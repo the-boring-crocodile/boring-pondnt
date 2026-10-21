@@ -1,0 +1,397 @@
+{
+  "d365_status": {
+    "name": "d365_status",
+    "description": "This environment: services and their state, URL, installed versions, elevation, d365fo.tools.",
+    "input_schema": {
+      "additionalProperties": false,
+      "properties": {},
+      "type": "object"
+    },
+    "annotations": {
+      "read_only_hint": true,
+      "destructive_hint": false,
+      "idempotent_hint": true,
+      "open_world_hint": false
+    }
+  },
+  "d365_models": {
+    "name": "d365_models",
+    "description": "Models on this box, live: name, module, layer. name: wildcard pattern.",
+    "input_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "exclude_microsoft": {
+          "default": false,
+          "type": "boolean"
+        },
+        "customizable_only": {
+          "default": false,
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
+    "annotations": {
+      "read_only_hint": true,
+      "destructive_hint": false,
+      "idempotent_hint": true,
+      "open_world_hint": false
+    }
+  },
+  "d365_build": {
+    "name": "d365_build",
+    "description": "Build a package (X++ compile and labels) as a job; dry_run shows the command only.",
+    "input_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "module": {
+          "type": "string"
+        },
+        "include_reports": {
+          "default": false,
+          "type": "boolean"
+        },
+        "dry_run": {
+          "default": false,
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "module"
+      ],
+      "type": "object"
+    },
+    "annotations": {
+      "read_only_hint": false,
+      "destructive_hint": true,
+      "idempotent_hint": false,
+      "open_world_hint": true
+    }
+  },
+  "d365_results": {
+    "name": "d365_results",
+    "description": "Last compile, best_practice (of a module) or sync: totals, then errors (and warnings) as rows.",
+    "input_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "module": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "kind": {
+          "default": "compile",
+          "type": "string"
+        },
+        "warnings": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "limit": {
+          "default": 50,
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
+    "annotations": {
+      "read_only_hint": true,
+      "destructive_hint": false,
+      "idempotent_hint": true,
+      "open_world_hint": false
+    }
+  },
+  "d365_db_sync": {
+    "name": "d365_db_sync",
+    "description": "Synchronize the database as a job (given packages, or all); then d365_results kind=sync.",
+    "input_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "modules": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "dry_run": {
+          "default": false,
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
+    "annotations": {
+      "read_only_hint": false,
+      "destructive_hint": true,
+      "idempotent_hint": false,
+      "open_world_hint": true
+    }
+  },
+  "d365_best_practice": {
+    "name": "d365_best_practice",
+    "description": "Run best practice checks on a model as a job; dry_run shows the command only.",
+    "input_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "module": {
+          "type": "string"
+        },
+        "model": {
+          "type": "string"
+        },
+        "dry_run": {
+          "default": false,
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "module",
+        "model"
+      ],
+      "type": "object"
+    },
+    "annotations": {
+      "read_only_hint": false,
+      "destructive_hint": true,
+      "idempotent_hint": false,
+      "open_world_hint": true
+    }
+  },
+  "d365_environment": {
+    "name": "d365_environment",
+    "description": "start | stop | restart services (all, aos, batch, financialreporter, dmf, documentrouting).",
+    "input_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "type": "string"
+        },
+        "services": {
+          "default": "all",
+          "type": "string"
+        }
+      },
+      "required": [
+        "action"
+      ],
+      "type": "object"
+    },
+    "annotations": {
+      "read_only_hint": false,
+      "destructive_hint": true,
+      "idempotent_hint": false,
+      "open_world_hint": false
+    }
+  },
+  "d365_job": {
+    "name": "d365_job",
+    "description": "A job's state and last output lines (stop=true ends it); without job_id: this session's jobs.",
+    "input_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "job_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tail_lines": {
+          "default": 40,
+          "type": "integer"
+        },
+        "stop": {
+          "default": false,
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
+    "annotations": {
+      "read_only_hint": true,
+      "destructive_hint": false,
+      "idempotent_hint": true,
+      "open_world_hint": false
+    }
+  },
+  "d365_sql": {
+    "name": "d365_sql",
+    "description": "SQL on this box's database (GO batches): rows as JSON. Meant for test setup and checks.",
+    "input_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "sql": {
+          "type": "string"
+        },
+        "max_rows": {
+          "default": 100,
+          "type": "integer"
+        },
+        "timeout": {
+          "default": 60,
+          "type": "integer"
+        },
+        "atomic": {
+          "default": false,
+          "type": "boolean"
+        },
+        "database": {
+          "default": "AxDB",
+          "type": "string"
+        }
+      },
+      "required": [
+        "sql"
+      ],
+      "type": "object"
+    },
+    "annotations": {
+      "read_only_hint": false,
+      "destructive_hint": true,
+      "idempotent_hint": false,
+      "open_world_hint": false
+    }
+  },
+  "xref_info": {
+    "name": "xref_info",
+    "description": "The database: version, providers, counts of names and references, the reference kinds.",
+    "input_schema": {
+      "additionalProperties": false,
+      "properties": {},
+      "type": "object"
+    },
+    "annotations": {
+      "read_only_hint": true,
+      "destructive_hint": false,
+      "idempotent_hint": true,
+      "open_world_hint": false
+    }
+  },
+  "xref_names": {
+    "name": "xref_names",
+    "description": "Paths for an element name or label ID (CustTable, @SYS1), or below a prefix (/Classes/Sales*).",
+    "input_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "element_type": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "limit": {
+          "default": 50,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "type": "object"
+    },
+    "annotations": {
+      "read_only_hint": true,
+      "destructive_hint": false,
+      "idempotent_hint": true,
+      "open_world_hint": false
+    }
+  },
+  "xref_references": {
+    "name": "xref_references",
+    "description": "used_by|uses of a path or label: totals by kind and module (package, not model), then rows. members: its children too.",
+    "input_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "direction": {
+          "default": "used_by",
+          "type": "string"
+        },
+        "kind": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "module": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "members": {
+          "default": false,
+          "type": "boolean"
+        },
+        "limit": {
+          "default": 50,
+          "type": "integer"
+        },
+        "offset": {
+          "default": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "type": "object"
+    },
+    "annotations": {
+      "read_only_hint": true,
+      "destructive_hint": false,
+      "idempotent_hint": true,
+      "open_world_hint": false
+    }
+  },
+  "xref_hierarchy": {
+    "name": "xref_hierarchy",
+    "description": "down: all classes extending (or implementing) a class or interface; up: its bases and interfaces.",
+    "input_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "direction": {
+          "default": "down",
+          "type": "string"
+        },
+        "limit": {
+          "default": 100,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "type": "object"
+    },
+    "annotations": {
+      "read_only_hint": true,
+      "destructive_hint": false,
+      "idempotent_hint": true,
+      "open_world_hint": false
+    }
+  }
+}
