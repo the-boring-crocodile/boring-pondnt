@@ -43,8 +43,17 @@ state or evidence that its buffers are saved.
 Inspect this session's tool list. Known VS/Copilot names include `get_file`,
 `create_file`, `replace_string_in_file` and `multi_replace_string_in_file`;
 some sessions expose `edit_file` or `apply_patch`. Use the IDE-owned tool,
-not an external namesake. Read the path from the `get_file` header and use
-that path for the edit; do not reconstruct it from memory.
+not an external namesake.
+
+Edit your own elements through the path the solution's project uses: the
+source repository, usually given relative to the solution. A search can return
+the same file under the package directory
+(`<drive>:\AosService\PackagesLocalDirectory\...`), often a link into the
+repository, and the edit tools do not always resolve that path. If an edit
+tool reports FileNotFound for a file you have just read, retry once with the
+solution-relative source path, or with `edit_file` instead of `apply_patch`.
+Never reconstruct a path from memory. Path handling differs between VS
+versions: note the form that worked.
 
 Read current content. For replacement tools, use unique full-line
 `oldString`/`newString` spans with enough context. Group compatible edits to
