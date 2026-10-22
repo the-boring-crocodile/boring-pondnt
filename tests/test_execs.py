@@ -187,7 +187,9 @@ def test_unconfirmed_cleanup_is_reported_as_data(monkeypatch):
 
 def test_temporary_folder_cleanup_errors_do_not_escape(tmp_path, monkeypatch):
     # The folder cannot be removed, as when a surviving process still holds a file open.
-    def busy(path, ignore_errors=False, onerror=None, *, onexc=None, dir_fd=None):
+    # tempfile passes private keywords that change between patch releases
+    # (3.14.9 added _onexc_kwargs); the stand-in accepts and ignores them.
+    def busy(path, ignore_errors=False, onerror=None, *, onexc=None, dir_fd=None, **_private):
         error = OSError(errno.EBUSY, "output file still open", str(path))
         if onexc is not None:
             onexc(os.rmdir, path, error)
