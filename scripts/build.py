@@ -254,6 +254,12 @@ def build(with_tests: bool, out: Path, services_root: Path, common_wheels: Path,
     lock.write_text(text)
     run(uv(), "pip", "install", "--quiet", "--target", str(stage / "python" / "Lib" / "site-packages"),
         *TARGET, "--require-hashes", "--no-deps", "--find-links", str(wheel_dir), "-r", str(lock))
+    # pywin32 brings two programs pondNT never runs: Pythonwin (an MFC editor)
+    # and the Windows-service host. The service kit uses win32api and win32job
+    # only. Unused executables in a downloaded zip only draw antivirus attention.
+    site_packages = stage / "python" / "Lib" / "site-packages"
+    shutil.rmtree(site_packages / "pythonwin")
+    (site_packages / "win32" / "pythonservice.exe").unlink()
 
     plain_copy(REPO / "kit", stage / "kit")
     # Optional, not the default: the Pond tunnel we test with, shipped, not installed.

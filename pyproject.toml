@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "boring-pondnt"
-version = "0.2.0rc22"
+version = "0.2.0rc23"
 license = "AGPL-3.0-or-later"
 license-files = ["LICENSE", "COPYING.md"]
 description = "Local stdio MCP server for Copilot in Visual Studio on a rebuildable Windows dev VM"
