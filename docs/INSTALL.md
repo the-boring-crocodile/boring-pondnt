@@ -2,7 +2,7 @@
 
 pondNT gives Copilot in Visual Studio two Windows-only MCP servers and three
 independent general services on a Dynamics 365 F&O development box. This
-page takes a box from "I have the zip" to "Copilot answers through them".
+page takes a box from the download to "Copilot answers through them".
 Windows gets one scheduled task per server under `\pondNT\`, and nothing
 else: no Windows service, no registry change, no PATH change.
 `.\setup.ps1 -Uninstall` removes the tasks again (step 9).
@@ -46,7 +46,7 @@ zip and inside it.
 
 ## The short way: setup.ps1
 
-After unpacking (step 1), in an elevated PowerShell window in the unpacked
+After downloading and unpacking (step 1), in an elevated PowerShell window in the unpacked
 folder, look first:
 
     powershell -ExecutionPolicy Bypass -File .\setup.ps1 -WhatIf
@@ -74,7 +74,25 @@ It never touches Defender unless you agree or add `-AddDefenderExclusion`
 [What setup installs](#what-setup-installs) lists every task and folder.
 The steps below are what it does, by hand.
 
-## 1. Unpack
+## 1. Download, check and unpack
+
+Releases are on
+[GitHub](https://github.com/the-boring-crocodile/boring-pondnt/releases);
+candidates are marked as pre-releases. Each has the zip and a `.sha256` file.
+`TAG` below is the release's tag (`v0.2.0-rc.23`), `VERSION` the version in
+the file name (`0.2.0rc23`). `curl.exe` comes with Windows:
+
+    $u = 'https://github.com/the-boring-crocodile/boring-pondnt/releases/download/TAG'
+    curl.exe -LO "$u/boring-pondnt-VERSION-win-x64.zip"
+    curl.exe -LO "$u/boring-pondnt-VERSION-win-x64.zip.sha256"
+    (Get-FileHash .\boring-pondnt-VERSION-win-x64.zip -Algorithm SHA256).Hash.ToLower() -eq (Get-Content .\boring-pondnt-VERSION-win-x64.zip.sha256).Split(' ')[0]
+
+The last line must print `True`. `Invoke-WebRequest` works too, but in
+Windows PowerShell 5.1 it is very slow on a file this size unless
+`$ProgressPreference = 'SilentlyContinue'` is set first. A browser may warn
+that the zip is not commonly downloaded, or Defender may look at it closely:
+it holds Python, PowerShell 7 and their programs. Keep it only if the hash
+matches. Then:
 
     Unblock-File .\boring-pondnt-VERSION-win-x64.zip
     Expand-Archive .\boring-pondnt-VERSION-win-x64.zip C:\tools
