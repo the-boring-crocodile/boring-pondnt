@@ -35,8 +35,8 @@ from what real use shows.
 
 ### bootstrap
 
-No arguments. Server name and version; the kit's `bootstrap.md` and the paths
-of its other documents (from `--kit`, else `<release>/kit`); on Windows, checks: the
+No arguments. Server name and version; the handbook's `bootstrap.md` and the paths
+of its other documents (from `--handbook`, else `<release>/handbook`); on Windows, checks: the
 default shell and the PowerShell 7 path, and `long_paths_enabled` with a
 warning when off.
 

@@ -24,11 +24,15 @@ import subprocess
 import threading
 import time
 import uuid
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
 from boring_service_kit.outcomes import Failed, Refused
-from boring_service_kit.process import Tree, settle
+from boring_service_kit.process import Tree
+
+from . import JOB_RETENTION_SECONDS
+from .job_lifecycle import ProcessJobs
 
 LOAD_SECONDS = 120
 CALL_SECONDS_DEFAULT = 60
@@ -390,27 +394,44 @@ def check_tail_lines(lines: int) -> None:
         raise Refused("invalid_request", f"tail_lines must be 1-{TAIL_LINES_MAX}")
 
 
-class Jobs:
+@dataclass(eq=False)
+class Job:
+    """One PowerShell job: its record, settled by job_lifecycle.ProcessJobs."""
+    job_id: str
+    kind: str
+    log: str
+    started: float
+    tree: Tree | None = None
+    timeout_seconds: float | None = None  # D365 jobs run until they end or are stopped
+    state: str = "running"
+    exit_code: int | None = None
+    ended: float | None = None
+    error: str | None = None
+    cleanup_error: str | None = None
+    done: threading.Event = field(default_factory=threading.Event)
+    stop_requested: threading.Event = field(default_factory=threading.Event)
+
+
+class Jobs(ProcessJobs[Job]):
     """Long operations, each in its own PowerShell with d365fo.tools, output to a log file."""
 
+    missing = "no such job in this session"
+
     def __init__(self, executable: str, state_dir: Path) -> None:
+        super().__init__()
         self.executable = executable
         self.folder = state_dir / "d365-jobs"
-        self._jobs: dict[str, dict[str, Any]] = {}
-        self._lock = threading.Lock()
-        self._closed = False
         self._sweep()
 
     def _sweep(self) -> None:
-        # Match the core job owner's seven-day policy, only for managed records
+        # The core job owner's seven-day policy, only for managed records
         # with confirmed terminal settlement. Nothing else in the folder is touched.
-        from . import JOB_RETENTION_SECONDS as RETENTION_SECONDS
         managed = self.folder / "managed"
         if not managed.exists():
             return
         if managed.is_symlink() or (managed.lstat().st_file_attributes & 1024 if os.name == "nt" else False):
             raise Failed("unavailable", "D365 managed log directory must be ordinary")
-        cutoff = time.time() - RETENTION_SECONDS
+        cutoff = time.time() - JOB_RETENTION_SECONDS
         for directory in managed.iterdir():
             if (not re.fullmatch(r"[0-9a-f]{12}", directory.name) or directory.is_symlink()
                     or (directory.lstat().st_file_attributes & 1024 if os.name == "nt" else False)):
@@ -445,83 +466,55 @@ class Jobs:
                        "[Console]::OutputEncoding = [Text.Encoding]::UTF8; "
                        "& { Import-Module d365fo.tools; Enable-D365Exception; " + script + " } *>&1 | "
                        'ForEach-Object { "$_" }')
+            job = Job(job_id, kind, str(log), time.time())
             try:
                 with os.fdopen(os.open(log, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "wb") as handle:
-                    tree = Tree(powershell_argv(self.executable, command=wrapped),
-                                Path.cwd(), dict(os.environ), handle, subprocess.STDOUT)
+                    job.tree = Tree(powershell_argv(self.executable, command=wrapped),
+                                    Path.cwd(), dict(os.environ), handle, subprocess.STDOUT)
             except OSError as error:
                 raise Failed("unavailable", f"{type(error).__name__}: cannot start PowerShell") from None
-            job = {"job_id": job_id, "kind": kind, "log": str(log), "started": time.time(),
-                   "tree": tree, "state": "running", "exit_code": None,
-                   "stop": threading.Event(), "done": threading.Event()}
-            self._jobs[job_id] = job
-            watcher = threading.Thread(target=self._watch, args=(job,), name=f"d365-job-{job_id}", daemon=True)
-            try:
-                watcher.start()
-            except BaseException:
-                # No watcher exists to own cleanup if thread admission failed.
-                try:
-                    tree.close()
-                    job.update(state="failed", error="job watcher could not start")
-                except Exception as error:
-                    job.update(state="failed", cleanup_confirmed=False,
-                               error=f"{type(error).__name__}: cleanup unconfirmed")
-                job["done"].set()
-                raise
+            self._publish(job)
         return self.status(job_id)
 
+    def _settled(self, job: Job) -> None:
+        if job.cleanup_error is None:
+            # A retention receipt, never command/output/credential content.
+            try:
+                Path(job.log).with_name("ended").touch(exist_ok=False)
+            except OSError:
+                pass  # retain diagnostics when retention publication is uncertain
+
     def _pending(self, kind: str) -> list[str]:
-        return [job["job_id"] for job in self._jobs.values() if job["kind"] == kind
-                and (not job["done"].is_set() or job.get("cleanup_confirmed") is False)]
+        return [job.job_id for job in self._jobs.values() if job.kind == kind
+                and (not job.done.is_set() or job.cleanup_error is not None)]
 
     def pending(self, kind: str) -> list[str]:
         with self._lock:
             return self._pending(kind)
 
-    def _watch(self, job: dict[str, Any]) -> None:
-        result = settle(job["tree"], job["stop"])
-        with self._lock:
-            job.update(state=result.state, exit_code=result.exit_code, ended=time.time())
-            if result.error:
-                job["error"] = result.error
-            if result.cleanup_error:
-                job.update(error=result.cleanup_error, cleanup_confirmed=False)
-        if not result.cleanup_error:
-            # A retention receipt, never command/output/credential content.
-            try:
-                Path(job["log"]).with_name("ended").touch(exist_ok=False)
-            except OSError:
-                pass  # retain diagnostics when retention publication is uncertain
-        job["done"].set()
-
-    def _job(self, job_id: str) -> dict[str, Any]:
-        with self._lock:
-            job = self._jobs.get(job_id)
-        if job is None:
-            raise Refused("not_found", "no such job in this session", job_id=job_id)
-        return job
-
     def status(self, job_id: str) -> dict[str, Any]:
-        job = self._job(job_id)
+        job = self._get(job_id)
         with self._lock:
-            result = {key: job[key] for key in ("job_id", "kind", "state", "exit_code", "log")}
-            result["seconds"] = round(job.get("ended", time.time()) - job["started"], 1)
-            for key in ("error", "cleanup_confirmed"):
-                if key in job:
-                    result[key] = job[key]
+            result: dict[str, Any] = {"job_id": job.job_id, "kind": job.kind, "state": job.state,
+                                      "exit_code": job.exit_code, "log": job.log}
+            result["seconds"] = round((job.ended or time.time()) - job.started, 1)
+            if job.cleanup_error is not None:
+                result.update(error=job.cleanup_error, cleanup_confirmed=False)
+            elif job.error is not None:
+                result["error"] = job.error
             return result
 
     def wait(self, job_id: str, seconds: float = 0) -> dict[str, Any]:
         """Observe settlement, including cleanup; never restart a command."""
         if not 0 <= seconds <= WAIT_SECONDS_MAX:
             raise Refused("invalid_request", f"wait_seconds must be 0-{WAIT_SECONDS_MAX}")
-        done = self._job(job_id)["done"]
+        done = self._get(job_id).done
         done.wait(seconds)
         return {**self.status(job_id), "wait_expired": not done.is_set()}
 
     def tail(self, job_id: str, lines: int = TAIL_LINES_DEFAULT) -> list[str]:
         check_tail_lines(lines)
-        path = Path(self._job(job_id)["log"])
+        path = Path(self._get(job_id).log)
         try:
             with open(path, "rb") as handle:
                 handle.seek(0, os.SEEK_END)
@@ -534,16 +527,8 @@ class Jobs:
         return [line.rstrip("\r") for line in text.split("\n")
                 if line.strip() and not line.startswith(("#< CLIXML", "<Objs "))][-lines:]
 
-    def _request_stop(self, job: dict[str, Any]) -> None:
-        with self._lock:
-            if job["state"] == "running":
-                job["state"] = "stopping"
-                job["stop"].set()
-
     def stop(self, job_id: str) -> dict[str, Any]:
-        job = self._job(job_id)
-        self._request_stop(job)
-        job["done"].wait(15)
+        self._stop(job_id)
         return self.status(job_id)
 
     def close_admission(self) -> None:
@@ -551,15 +536,7 @@ class Jobs:
             self._closed = True
 
     def shutdown(self) -> None:
-        with self._lock:
-            self._closed = True
-            pending = list(self._jobs.values())
-        for job in pending:
-            self._request_stop(job)
-        deadline = time.monotonic() + 25
-        for job in pending:
-            job["done"].wait(max(0, deadline - time.monotonic()))
-        if any(not job["done"].is_set() or job.get("cleanup_confirmed") is False for job in pending):
+        if self._shutdown(25):
             raise Failed("cleanup_unconfirmed", "D365 job cleanup was not confirmed")
 
     def list(self) -> list[dict[str, Any]]:

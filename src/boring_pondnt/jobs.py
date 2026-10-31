@@ -5,6 +5,9 @@ files, status, a wait over several jobs, output by tail or by line range,
 stop, list. Jobs live as long as the server: on exit every tree is killed
 (on Windows also by the Job Objects' kill-on-close if the server dies hard).
 Output files stay in the state directory and are swept after a week.
+
+Its lifecycle (admission, watcher, stop, shutdown) is `job_lifecycle.ProcessJobs`, shared with
+the D365 server's PowerShell jobs.
 """
 
 from __future__ import annotations
@@ -22,7 +25,9 @@ from typing import Any
 from . import execs
 from . import JOB_RETENTION_SECONDS as RETENTION_SECONDS
 from boring_service_kit.outcomes import Failed, Refused
-from boring_service_kit.process import Tree, settle
+from boring_service_kit.process import Tree
+
+from .job_lifecycle import ProcessJobs
 
 TIMEOUT_MAX = 86_400.0
 WAIT_MAX = 60.0
@@ -62,7 +67,7 @@ def _iso(timestamp: float) -> str:
     return datetime.fromtimestamp(timestamp, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-@dataclass
+@dataclass(eq=False)
 class Job:
     job_id: str
     command: str
@@ -103,13 +108,11 @@ class Job:
         return result
 
 
-class Jobs:
+class Jobs(ProcessJobs[Job]):
     def __init__(self, state_dir: Path) -> None:
+        super().__init__()
         self.root = state_dir / "jobs"
         self.root.mkdir(parents=True, exist_ok=True)
-        self._jobs: dict[str, Job] = {}
-        self._lock = threading.RLock()
-        self._closed = False
         self._sweep()
         atexit.register(self.shutdown)
 
@@ -142,59 +145,16 @@ class Jobs:
         except OSError as exc:
             shutil.rmtree(directory, ignore_errors=True)
             raise Failed("start_failed", str(exc)) from None
-        self._jobs[job_id] = job
-        try:
-            threading.Thread(target=self._watch, args=(job,), name=f"job-{job_id[:8]}", daemon=True).start()
-        except Exception as error:
-            # No watcher was admitted. Run its same settlement owner here.
-            job.stop_requested.set()
-            self._watch(job)
-            job.state = "failed"
-            job.error = f"{type(error).__name__}: watcher startup failed"
-            raise Failed("start_failed", "job watcher could not start", job_id=job_id) from None
+        self._publish(job)
         return job.status()
-
-    def _watch(self, job: Job) -> None:
-        """The sole owner of terminal state and tree cleanup."""
-        assert job.tree is not None
-        result = settle(job.tree, job.stop_requested, job.timeout_seconds)
-        with self._lock:
-            job.state, job.ended = result.state, time.time()
-            job.exit_code = result.exit_code
-            job.error, job.cleanup_error = result.error, result.cleanup_error
-        job.done.set()
-
-    def _request_stop(self, job: Job) -> None:
-        with self._lock:
-            if job.state == "running":
-                job.state = "stopping"
-                job.stop_requested.set()
 
     def stop(self, job_id: str) -> dict[str, Any]:
-        job = self._get(job_id)
-        self._request_stop(job)
-        job.done.wait(15)
-        return job.status()
+        return self._stop(job_id).status()
 
     def shutdown(self) -> None:
-        with self._lock:
-            self._closed = True
-            pending = [job for job in self._jobs.values() if not job.done.is_set()]
-        for job in pending:
-            self._request_stop(job)
-        deadline = time.monotonic() + 15
-        for job in pending:
-            job.done.wait(max(0, deadline - time.monotonic()))
-        # Keep unconfirmed jobs in their recorded state; never manufacture stopped.
+        self._shutdown(15)
 
     # --- reading -----------------------------------------------------------
-
-    def _get(self, job_id: str) -> Job:
-        with self._lock:
-            job = self._jobs.get(job_id)
-        if job is None:
-            raise Refused("not_found", "no such job in this server session", job_id=job_id)
-        return job
 
     def status(self, job_id: str) -> dict[str, Any]:
         return self._get(job_id).status()

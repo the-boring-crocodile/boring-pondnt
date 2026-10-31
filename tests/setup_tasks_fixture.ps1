@@ -6,7 +6,7 @@ $ast = [Management.Automation.Language.Parser]::ParseFile($Setup, [ref]$tokens, 
 if ($errors.Count) { throw ($errors | Out-String) }
 # Import only named function definitions. Never execute setup's top-level statements.
 $names = @('Quote','Service-ProcessCommand','Service-TaskCommand','Owned-TaskPython',
-           'Read-ServiceTask','Checked-ServiceTask','Stop-ServiceProcesses',
+           'Read-ServiceTask','Checked-ServiceTask','Service-Processes','Stop-ServiceProcesses',
            'Current-User','Service-UserArguments','Owned-UserTaskPython')
 foreach ($name in $names) {
     $found = @($ast.FindAll({ param($node)
@@ -87,26 +87,27 @@ $script:processes = @(
     [pscustomobject]@{ProcessId=11;ExecutablePath=$python;CommandLine=$command},
     [pscustomobject]@{ProcessId=12;ExecutablePath=$python;CommandLine=($command+' --unrelated')},
     [pscustomobject]@{ProcessId=13;ExecutablePath='C:\other\python.exe';CommandLine=$command},
-    [pscustomobject]@{ProcessId=14;ExecutablePath=$python;CommandLine=('python inspect.py "'+$item.folder+'\file"')}
+    [pscustomobject]@{ProcessId=14;ExecutablePath=$python;CommandLine=('python inspect.py "'+$item.folder+'\file"')},
+    [pscustomobject]@{ProcessId=15;ExecutablePath=$python;CommandLine=($command.Replace(('"'+$python+'" '),('"'+$python+'"  '))+' ')}
 )
 $script:stopped=@()
 function Get-CimInstance { param($ClassName,$Filter) $script:processes }
-function Stop-Process { param($Id,[switch]$Force,$ErrorAction) $script:stopped += $Id }
+function Stop-CheckedProcess { param($Observed) $script:stopped += $Observed.ProcessId }
 Stop-ServiceProcesses $item $python
-if ($script:stopped.Count -ne 1 -or $script:stopped[0] -ne 11) { throw 'Unrelated process selected' }
+if (($script:stopped -join ',') -cne '11,15') { throw 'Owned cmd separator variant missed or unrelated process selected' }
 
-# the core's task, as the person at logon through pythonw, serving the state kit.
+# the core's task, as the person at logon through pythonw, serving the state handbook.
 $core = [pscustomobject]@{
     account = 'user'
     module = 'boring_pondnt.server'
     folder = 'C:\fixture\services\core'
     task = 'pondNT boring-pondnt'
-    arguments = @('--config','C:\fixture\services\core\config.json','--kit','C:\fixture\kit')
+    arguments = @('--config','C:\fixture\services\core\config.json','--handbook','C:\fixture\handbook')
     log = 'C:\fixture\services\core\service.log'
 }
 $pythonw = 'C:\old release\python\pythonw.exe'
 $coreArgs = '-X utf8 -m boring_pondnt.background --log "C:\fixture\services\core\service.log" boring_pondnt.server "--config" "C:\fixture\services\core\config.json"'
-$kitArgs = $coreArgs + ' "--kit" "C:\fixture\kit"'
+$kitArgs = $coreArgs + ' "--handbook" "C:\fixture\handbook"'
 if ((Service-UserArguments $core) -cne $kitArgs) { throw 'Core task arguments changed' }
 function Core-Task {
     [pscustomobject]@{
@@ -116,6 +117,10 @@ function Core-Task {
     }
 }
 if ((Owned-TaskPython $core (Core-Task)) -cne $pythonw) { throw 'Core task not recognized' }
+# A core task from before the handbook (--kit) is not this release's: retained for review.
+$t = Core-Task; $t.Actions[0].Arguments = $coreArgs + ' "--kit" "C:\fixture\kit"'
+if (Owned-TaskPython $core $t) { throw 'Pre-handbook core task accepted' }
+
 foreach ($case in @('other-user','boot','system-logon','console-python','extra-argument','no-kit','not-elevated')) {
     $t = Core-Task
     switch ($case) {
@@ -154,4 +159,9 @@ $null = Services-Plan $cfg -Apply -Finalize
 $null = Services-Plan $cfg -Apply
 $modes = $script:planned | ForEach-Object { ($_ | Where-Object { $_ -in '--plan','--uninstall','--finalize' }) -join ',' }
 if (($modes -join '|') -cne '--plan|--uninstall|--finalize|') { throw "Planner modes wrong: $($modes -join '|')" }
+# -Gateway goes to plan and apply only; uninstall and finalize read the gateway's ferry.json.
+$Gateway = 'all'; $script:planned = @()
+$null = Services-Plan $cfg; $null = Services-Plan $cfg -Remove; $null = Services-Plan $cfg -Apply -Finalize; $null = Services-Plan $cfg -Apply
+$gated = $script:planned | ForEach-Object { [string]([array]::IndexOf(@($_), '--gateway') -ge 0) }
+if (($gated -join '|') -cne 'True|False|False|True') { throw "Gateway passed wrong: $($gated -join '|')" }
 Write-Output 'PASS: legacy ownership, customized task refusal, exact process selection; synthetic APIs only.'

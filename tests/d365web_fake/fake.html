@@ -1,0 +1,410 @@
+<!doctype html>
+<!-- A tiny stand-in for the D365 web client: only the markup d365web_client relies on (see its docstring). -->
+<html><head><meta charset="utf-8"><title>All purchase orders -- Finance and Operations</title>
+<style>
+  body { margin: 0; font: 14px sans-serif; }
+  .grid { position: relative; height: 96px; width: 760px; overflow: hidden; border: 1px solid #888; }
+  [role=row] { position: absolute; left: 0; height: 24px; width: 760px; display: flex; }
+  [role=gridcell], [role=columnheader] { width: 180px; }
+  [role=gridcell] input { width: 160px; }
+  .lookup-popup, .dialog { position: absolute; left: 820px; top: 40px; width: 380px; background: #eee; border: 1px solid #333; }
+  .lookup-popup .grid { width: 370px; }
+  .box { display: inline-block; width: 16px; height: 16px; border: 1px solid #333; }
+</style></head>
+<body>
+<form data-dyn-role="Form" data-dyn-form-name="HiddenList" style="display:none">
+  <div data-dyn-controlname="OrderAccount" data-dyn-role="Input"><label>Vendor account</label><input value="hidden"></div>
+</form>
+<form data-dyn-role="Form" data-dyn-form-name="PurchTable" id="main" class="primaryConductor" style="display:block;width:800px;height:640px">
+  <span class="titleField" data-dyn-controlname="HeaderTitle">00000001 : 1001 - Acme</span>
+  <div data-dyn-controlname="PurchOrder" data-dyn-role="AppBarTab"><button type="button" aria-expanded="true">Purchase order</button></div>
+  <div data-dyn-controlname="buttonConfirm" data-dyn-role="MenuItemButton"><button type="button" id="confirm">Confirm</button></div>
+  <div data-dyn-controlname="buttonNever" data-dyn-role="CommandButton"><button type="button" disabled>Never</button></div>
+  <div data-dyn-controlname="SystemDefinedNewButton" data-dyn-role="CommandButton"><button type="button" id="new">New</button></div>
+  <div data-dyn-controlname="OrderAccount" data-dyn-role="Input"><label>Vendor account</label><input id="vend"></div>
+  <div data-dyn-controlname="VendorName" data-dyn-role="Input"><label>Name</label><input id="vname" readonly></div>
+  <div data-dyn-controlname="AccountNum" data-dyn-role="Input"><label>Account</label><span class="field-status statusMandatory"></span><input id="acct"></div>
+  <div data-dyn-controlname="185" data-dyn-role="Button"><button type="button">=</button></div>
+  <div data-dyn-controlname="OneTime" data-dyn-role="CheckBox"><label>One-time supplier</label>
+    <span role="checkbox" aria-checked="false" id="cb" class="box" tabindex="0"></span></div>
+  <div data-dyn-controlname="SaveAndOpenButton" data-dyn-role="MenuButton" class="flyoutContainer"><button type="button" id="saveopen">Save and open</button></div>
+  <div data-dyn-controlname="LineStripDelete" data-dyn-role="CommandButton"><button type="button" id="delline">Remove</button></div>
+  <div data-dyn-controlname="QuickFilter" data-dyn-role="QuickFilter" class="quickFilter"><input id="qf"></div>
+  <div data-dyn-controlname="GenerateLP" data-dyn-role="CheckBox"><span class="checkBox" role="checkbox" aria-checked="true" id="glpcb"></span>
+    <label>Generate license plate</label><div class="field"><span class="toggle-box box" role="switch" id="glp"></span><span class="toggle-value">Yes</span></div></div>
+  <div data-dyn-controlname="TipButton" data-dyn-role="CommandButton"><button type="button" id="tipbtn">Show tip</button></div>
+  <div data-dyn-controlname="BlockButton" data-dyn-role="CommandButton"><button type="button" id="blockbtn">Block</button></div>
+  <div data-dyn-controlname="Unitization" data-dyn-role="ComboBox"><label>Unitization</label><input id="unit" value="License plate grouping"></div>
+  <div data-dyn-controlname="WorkActivity" data-dyn-role="ComboBox"><label>Activity code</label><input id="activity" value="None"></div>
+  <div data-dyn-controlname="MessageBar" data-dyn-role="MessageBar" id="mbar"></div>
+  <div data-dyn-controlname="LineSpec" data-dyn-role="ReactList" class="grid" id="lines"></div>
+</form>
+<script>
+  let busyUntil = 0;
+  window.$dyn = { clientBusy: () => Date.now() < busyUntil };
+  const later = (ms, fn) => { busyUntil = Date.now() + ms; setTimeout(fn, ms); };
+  const VENDORS = [['1001', 'Acme Office Supplies'], ['1002', 'Lande Packaging Supplies'], ['1003', 'Ade Supply Company']];
+  const el = (html) => { const t = document.createElement('template'); t.innerHTML = html.trim(); return t.content.firstChild; };
+
+  function message(severity, text) {
+    document.getElementById('mbar').appendChild(el(`<div data-dyn-role="MessageBarSection" class="messageBarSection-${severity} messageBar">
+      <div class="messageBar-messageRegion">${text}</div></div>`));
+  }
+  function cell(name, value, link) {
+    return `<div role="gridcell"><div data-dyn-controlname="${name}" data-dyn-role="Input">` +
+      (link ? `<input class="dyn-field dyn-hyperlink" value="${value}" readonly style="width:160px">` : `<input value="${value}">`) +
+      `</div></div>`;
+  }
+  function grid(target, columns, rows, offscreen, links) {
+    target.appendChild(el(`<div role="row" style="top:0">` + columns.map(c =>
+      `<div role="columnheader"><span data-dyn-controlname="${c[0]}">${c[1]}</span></div>`).join('') + `</div>`));
+    // rows go into the DOM in reverse (a virtualized pool); top decides the visual order
+    rows.map((r, i) => [r, i]).reverse().forEach(([r, i]) => {
+      target.appendChild(el(`<div role="row" aria-rowindex="${i + 2}" style="top:${24 * (i + 1)}px">` +
+        r.map((v, k) => cell(columns[k][0], v, links && k === 0)).join('') + `</div>`));
+    });
+    if (offscreen) target.appendChild(el(`<div role="row" style="top:-300px">` +
+      offscreen.map((v, k) => cell(columns[k][0], v)).join('') + `</div>`));
+    target.addEventListener('mousedown', (ev) => {
+      const row = ev.target.closest('[role=row]');
+      // like D365: a hyperlink cell opens the record only when its text is hit (left part)
+      const link = ev.target.closest('.dyn-hyperlink');
+      if (link) {
+        // the text's width, roughly: 7px a character ("DemoReceiving" reaches past 40px)
+        if (ev.clientX - link.getBoundingClientRect().left < 8 + 7 * link.value.length) later(150, () => message('Info', 'Opened ' + link.value));
+        return;
+      }
+      if (!row) return;
+      target.querySelectorAll('[role=row]').forEach(r => r.removeAttribute('aria-selected'));
+      row.setAttribute('aria-selected', 'true');
+    });
+  }
+  const LINE_COLUMNS = [['PurchLine_LineNumber', 'Line'], ['PurchLine_ItemId', 'Item'], ['PurchLine_Qty', 'Quantity']];
+  let LINES = [['1', 'A0001', '5'], ['2', 'A0002', '7']];
+  function renderLines(filter) {
+    const target = document.getElementById('lines');
+    const fresh = target.cloneNode(false);  // drops the old listeners with the rows
+    target.replaceWith(fresh);
+    const rows = filter ? LINES.filter(r => r[filter[0]] === filter[1]) : LINES;
+    grid(fresh, LINE_COLUMNS, rows, ['9', 'GHOST', '0'], true);
+  }
+  renderLines(null);
+
+  // quick filter: typing offers one option per column; clicking one filters; Enter on empty clears
+  const qf = document.getElementById('qf');
+  qf.addEventListener('input', () => {
+    document.querySelectorAll('.quickFilter-dropdown').forEach(d => d.remove());
+    if (!qf.value) return;
+    const drop = el(`<div class="sysPopup quickFilter-dropdown" style="position:absolute;left:300px;top:200px;width:300px;background:#fff">
+      <ul role="listbox">` + LINE_COLUMNS.map((c, k) => `<li role="option" class="quickFilter-listItem" data-k="${k}">
+      <span class="quickFilter-listFieldName">${c[1]}</span> "<span class="quickFilter-listFilterValue">${qf.value}</span>"</li>`).join('') +
+      `</ul></div>`);
+    document.body.appendChild(drop);
+    drop.addEventListener('click', (ev) => {
+      const li = ev.target.closest('li'); if (!li) return;
+      const value = qf.value;
+      drop.remove();
+      later(200, () => renderLines([Number(li.dataset.k), value]));
+    });
+  });
+  qf.addEventListener('keydown', (ev) => {
+    if (ev.key === 'Enter' && !qf.value) later(200, () => renderLines(null));
+  });
+
+  // a D365 "What's new" teaching tip lying over the Generate LP toggle (as "Save queries to these views"
+  // over the view selector after a filter); its own button acknowledges it
+  const cover = (target, html) => { const r = target.getBoundingClientRect();
+    const d = el(html); d.style.cssText = `position:fixed;left:${r.left - 10}px;top:${r.top - 10}px;width:200px;height:${r.height + 40}px;background:#fff;z-index:9`;
+    document.body.appendChild(d); return d; };
+  document.getElementById('tipbtn').addEventListener('click', () => {
+    const tip = cover(document.getElementById('glp'), `<div class="qtip qtip-default whatsNew" id="qtip-fake-whatsNewTip"><div class="qtip-content">Save queries to these views</div></div>`);
+    const ok = el(`<button type="button">Got it!</button>`); ok.style.cssText = 'position:absolute;right:4px;bottom:4px';
+    ok.addEventListener('click', () => tip.remove()); tip.appendChild(ok);
+  });
+  document.getElementById('blockbtn').addEventListener('click', () => {
+    cover(document.getElementById('cb'), `<div class="strangeOverlay">something else</div>`);
+  });
+  document.getElementById('glp').addEventListener('click', () => {
+    const cb = document.getElementById('glpcb'), on = cb.getAttribute('aria-checked') !== 'true';
+    cb.setAttribute('aria-checked', String(on));
+    document.querySelector('[data-dyn-controlname=GenerateLP] .toggle-value').textContent = on ? 'Yes' : 'No';
+  });
+  // an enum combo box: typing is ignored (D365 restores the value); Alt+Down lists the options
+  const unit = document.getElementById('unit');
+  unit.addEventListener('keydown', (ev) => {
+    if (ev.altKey && ev.key === 'ArrowDown') {
+      ev.preventDefault();
+      const list = el(`<ul class="comboBox-list sysPopup" role="listbox" style="position:absolute;left:300px;top:260px;background:#fff">` +
+        ['None', 'License plate grouping', 'User defined'].map(o => `<li role="option">${o}</li>`).join('') + `</ul>`);
+      document.body.appendChild(list);
+      list.addEventListener('click', (e) => { const li = e.target.closest('li'); if (!li) return;
+        unit.value = li.textContent; list.remove(); later(150, () => {}); });
+      return;
+    }
+    if (ev.key === 'Escape') { document.querySelectorAll('.comboBox-list').forEach(l => l.remove()); return; }
+    if (ev.key.length === 1 || ev.key === 'Backspace' || ev.key === 'Delete') ev.preventDefault();
+  });
+  unit.addEventListener('beforeinput', (ev) => ev.preventDefault());
+  // a long enum list scrolls inside its popup: options below the fold are clipped until scrolled to
+  // (D365's Activity code on Mobile device menu items, test box, 2026-10-26)
+  const activity = document.getElementById('activity');
+  activity.addEventListener('keydown', (ev) => {
+    if (ev.altKey && ev.key === 'ArrowDown') {
+      ev.preventDefault();
+      const names = ['None'].concat(Array.from({length: 40}, (_, i) => `Activity ${String(i + 1).padStart(2, '0')}`), ['Demo receiving']);
+      const list = el(`<ul class="comboBox-list sysPopup" role="listbox" style="position:absolute;left:300px;top:260px;height:120px;overflow-y:auto;margin:0;padding:0;background:#fff">` +
+        names.map(o => `<li role="option" style="height:20px;list-style:none">${o}</li>`).join('') + `</ul>`);
+      document.body.appendChild(list);
+      list.addEventListener('click', (e) => { const li = e.target.closest('li'); if (!li) return;
+        activity.value = li.textContent; list.remove(); });
+      return;
+    }
+    if (ev.key === 'Escape') { document.querySelectorAll('.comboBox-list').forEach(l => l.remove()); return; }
+    if (ev.key.length === 1 || ev.key === 'Backspace' || ev.key === 'Delete') ev.preventDefault();
+  });
+  activity.addEventListener('beforeinput', (ev) => ev.preventDefault());
+
+  // a menu button: its flyout is appended to the body, outside the form (like D365's "Save and open")
+  document.getElementById('saveopen').addEventListener('click', () => later(100, () => {
+    const menu = el(`<div class="sysPopup flyoutButton-flyOut" role="menu" style="position:absolute;left:300px;top:120px;background:#fff">
+      <div data-dyn-controlname="saveAndOpenQuotation" data-dyn-role="MenuItem"><button type="button">Sales quotation</button></div>
+      <div data-dyn-controlname="saveAndOpenSalesOrder" data-dyn-role="MenuItem"><button type="button">Sales order</button></div></div>`);
+    document.body.appendChild(menu);
+    menu.addEventListener('click', (ev) => {
+      const item = ev.target.closest('[data-dyn-role=MenuItem]'); if (!item) return;
+      menu.remove();
+      later(150, () => message('Info', 'Opened ' + item.textContent.trim()));
+    });
+  }));
+  // a message box like D365's: lightbox dialog, the question in a titleField, Yes/No command buttons
+  document.getElementById('delline').addEventListener('click', () => later(150, () => {
+    const box = el(`<div class="rootContent rootContent-lightBox dialog" role="dialog" data-dyn-formname="SysBoxForm">
+      <div data-dyn-controlname="TextGroup" data-dyn-role="Group"><span class="titleField staticText" data-dyn-controlname="FormStaticTextControl1" data-dyn-role="Label">You are about to delete a record in Purchase order lines. Delete record?</span></div>
+      <div data-dyn-controlname="Yes" data-dyn-role="CommandButton"><button type="button">Yes</button></div>
+      <div data-dyn-controlname="No" data-dyn-role="CommandButton"><button type="button">No</button></div></div>`);
+    document.body.appendChild(box);
+    box.querySelector('[data-dyn-controlname=No] button').onclick = () => later(100, () => box.remove());
+    box.querySelector('[data-dyn-controlname=Yes] button').onclick = () => later(100, () => {
+      box.remove(); LINES = LINES.slice(0, -1); renderLines(null); });
+  }));
+
+  const vend = document.getElementById('vend');
+  vend.addEventListener('change', () => later(300, () => {
+    const hit = VENDORS.find(v => v[0] === vend.value);
+    document.getElementById('vname').value = hit ? hit[1] : '';
+    if (!hit && vend.value) message('Warning', `The value '${vend.value}' in field 'Vendor account' is not found in the related table 'Vendors'.`);
+  }));
+  vend.addEventListener('keydown', (ev) => {
+    if (!(ev.altKey && ev.key === 'ArrowDown')) return;
+    ev.preventDefault();
+    const typed = vend.value;
+    later(200, () => {
+      const pop = el(`<div class="lookup-popup" data-dyn-role="Popup" role="dialog" data-dyn-form-name="VendTableLookup">
+        <div data-dyn-controlname="Grid" data-dyn-role="ReactList" class="grid"></div></div>`);
+      document.body.appendChild(pop);
+      // unfiltered, only the first two vendors are in view; typed text filters
+      const rows = typed ? VENDORS.filter(v => v[0].startsWith(typed)) : VENDORS.slice(0, 2);
+      grid(pop.querySelector('.grid'), [['VendTable_AccountNum', 'Vendor account'], ['DirPartyTable_Name', 'Name']], rows);
+      pop.addEventListener('click', (e) => {
+        const row = e.target.closest('[role=row]');
+        if (!row || !row.querySelector('input')) return;
+        vend.value = row.querySelector('input').value;
+        pop.remove();
+        vend.dispatchEvent(new Event('change'));
+      });
+    });
+  });
+  vend.addEventListener('keydown', (ev) => {
+    const pop = document.querySelector('.lookup-popup');
+    if (ev.key === 'Escape' && pop) pop.remove();
+  });
+  // a number-sequence field: values not matching US-### are silently dropped (as D365 did with BPT-001)
+  const acct = document.getElementById('acct');
+  acct.addEventListener('change', () => later(150, () => { if (!/^US-\d{3}$/.test(acct.value)) acct.value = ''; }));
+  document.getElementById('cb').addEventListener('click', (ev) => {
+    const cb = ev.currentTarget;
+    cb.setAttribute('aria-checked', cb.getAttribute('aria-checked') === 'true' ? 'false' : 'true');
+  });
+  document.getElementById('new').addEventListener('click', () => later(200, () => {
+    const dlg = el(`<div class="dialog" role="dialog" data-dyn-role="Dialog" data-dyn-form-name="PurchCreateOrder">
+      <span>Create purchase order</span>
+      <div data-dyn-controlname="OrderAccount" data-dyn-role="Input"><label>Vendor account</label><input id="dlgvend"></div>
+      <div data-dyn-controlname="OK" data-dyn-role="CommandButton"><button type="button">OK</button></div>
+      <div data-dyn-controlname="Cancel" data-dyn-role="CommandButton"><button type="button">Cancel</button></div></div>`);
+    document.body.appendChild(dlg);
+    dlg.querySelector('[data-dyn-controlname=Cancel] button').onclick = () => later(100, () => dlg.remove());
+    dlg.querySelector('[data-dyn-controlname=OK] button').onclick = () => later(100, () => {
+      vend.value = document.getElementById('dlgvend').value;
+      dlg.remove();
+      vend.dispatchEvent(new Event('change'));
+    });
+  }));
+  document.getElementById('confirm').addEventListener('click', () => later(100, () => {
+    // server work behind a progress dialog while clientBusy() is false
+    // markup as captured from D365 (journal posting): SysBoxForm lightbox + ProgressBar; main area aria-busy
+    const dlg = el(`<div class="rootContent rootContent-lightBox dialog" role="dialog" data-dyn-formname="SysBoxForm">
+      <span>Processing operation - Confirm purchase orders</span>
+      <div class="progressBar" role="progressbar" data-dyn-role="ProgressBar" data-dyn-controlname="IndeterminateProgressControl" style="height:4px">
+      <div class="progressBar-indicator-container"><div class="progressBar-indicator"></div></div></div>
+      <button type="button">Cancel</button></div>`);
+    document.body.appendChild(dlg);
+    const main = document.getElementById('main');
+    setTimeout(() => { dlg.remove(); main.setAttribute('aria-busy', 'true'); }, 1000);  // dialog gone, server still busy
+    setTimeout(() => { main.removeAttribute('aria-busy'); message('Info', 'Operation completed'); }, 2000);
+  }));
+
+  // list panes with one hyperlink column (mi=DemoMenuLists; D365's setup-form menu list): the link
+  // text opens the record
+  if (location.search.includes('DemoMenuLists')) {
+    document.getElementById('main').style.display = 'none';
+    const form = el(`<form data-dyn-role="Form" data-dyn-form-name="DemoSetup" class="primaryConductor" style="display:block;width:800px;height:640px">
+      <div data-dyn-controlname="MenuList" data-dyn-role="ReactList" class="grid" id="menus" style="width:400px"></div>
+      <div data-dyn-controlname="WideLinkList" data-dyn-role="ReactList" class="grid" id="widelinks" style="width:400px"></div></form>`);
+    document.body.appendChild(form);
+    form.appendChild(document.getElementById('mbar'));  // messages show on this form
+    // D365's hover preview of a linked record: resting on a menu row opens it next to the row
+    const menus = document.getElementById('menus');
+    let preview = null;
+    menus.addEventListener('mouseover', (ev) => {
+      if (preview || !ev.target.closest('[role=row]')) return;
+      preview = el(`<div role="dialog" data-dyn-form-name="WHSRFMenuItemTable_AutoEnhancedPreview_2"
+        style="position:absolute;left:120px;top:20px;width:300px;height:200px;background:#eee">Menu item name</div>`);
+      document.body.appendChild(preview);
+    });
+    menus.addEventListener('mouseleave', () => { if (preview) { preview.remove(); preview = null; } });
+    grid(document.getElementById('menus'), [['MenuName', 'Menu item']], [['DemoReceiving'], ['Demo receiving']], null, true);
+    grid(document.getElementById('widelinks'), [['WideName', 'Name']], [['Only link']], null, true);
+    document.querySelectorAll('#widelinks [role=row]').forEach(r => { r.style.width = '400px'; });
+    document.querySelectorAll('#widelinks [role=gridcell], #widelinks [role=columnheader]').forEach(c => { c.style.width = '100%'; });
+    document.querySelectorAll('#widelinks [role=gridcell] > div, #widelinks .dyn-hyperlink').forEach(i => { i.style.width = '100%'; i.style.boxSizing = 'border-box'; i.style.margin = '0'; });
+  }
+
+  // a long log list (mi=DemoLongLog): virtualized like D365 -- only rows near the scroll position are in
+  // the DOM, and the next block of rows loads when the list is scrolled to its end
+  if (location.search.includes('DemoLongLog')) {
+    document.getElementById('main').style.display = 'none';
+    const form = el(`<form data-dyn-role="Form" data-dyn-form-name="DemoLog" class="primaryConductor" style="display:block;width:800px;height:640px">
+      <div data-dyn-controlname="LogGrid" data-dyn-role="Grid" class="grid" style="height:auto;overflow:visible">
+        <div role="row" style="position:relative"><div role="columnheader"><span data-dyn-controlname="DocId">Document</span></div>
+          <div role="columnheader"><span data-dyn-controlname="Failure">Failure type</span></div>
+          <div role="columnheader"><span data-dyn-controlname="Status">Status</span></div></div>
+        <div id="logscroll" style="position:relative;height:120px;overflow-y:auto;width:780px"><div id="logspacer" style="position:relative"></div></div>
+      </div></form>`);
+    document.body.appendChild(form);
+    let loaded = 30, loading = false;
+    const doc = (n) => 'DOC-' + String(n).padStart(8, '0');
+    const scroller = document.getElementById('logscroll'), spacer = document.getElementById('logspacer');
+    const paint = () => {
+      spacer.style.height = (24 * loaded) + 'px';
+      spacer.innerHTML = '';
+      const first = Math.max(0, Math.floor(scroller.scrollTop / 24) - 1);
+      for (let i = first; i < Math.min(loaded, first + 7); i++) {
+        const n = i + 1;
+        spacer.appendChild(el(`<div role="row" aria-rowindex="${i + 2}" style="top:${24 * i}px">` +
+          cell('DocId', doc(n)) + cell('Failure', n === 21 ? 'Batch mismatch' : 'Expiry mismatch') + cell('Status', 'Open') + `</div>`));
+      }
+    };
+    scroller.addEventListener('scroll', () => {
+      paint();
+      if (!loading && loaded < 40 && scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - 2) {
+        loading = true; later(300, () => { loaded = 40; loading = false; paint(); });
+      }
+    });
+    spacer.addEventListener('mousedown', (ev) => {
+      const row = ev.target.closest('[role=row]'); if (!row) return;
+      spacer.querySelectorAll('[role=row]').forEach(r => r.removeAttribute('aria-selected'));
+      row.setAttribute('aria-selected', 'true');
+    });
+    paint();
+  }
+
+  // a log whose rows come in data blocks (mi=DemoKeyLog), like a custom receiving log on the test box
+  // (2026-10-26): 30 rows are in the DOM, all of them inside the scroll area, so scrolling brings
+  // nothing new; the next block comes only when the selection moves past the last row with the keyboard
+  if (location.search.includes('DemoKeyLog')) {
+    document.getElementById('main').style.display = 'none';
+    const TOTAL = 45, BLOCK = 30;
+    const form = el(`<form data-dyn-role="Form" data-dyn-form-name="DemoLog" class="primaryConductor" style="display:block;width:800px;height:900px">
+      <div data-dyn-controlname="KeyGrid" data-dyn-role="Grid" class="grid" tabindex="0" aria-rowcount="${TOTAL + 1}" style="height:auto;overflow:visible">
+        <div role="row" style="position:relative"><div role="columnheader"><span data-dyn-controlname="DocId">Document</span></div>
+          <div role="columnheader"><span data-dyn-controlname="Status">Status</span></div></div>
+        <div id="keyscroll" style="position:relative;height:760px;overflow-y:auto;width:780px"><div id="keyrows" style="position:relative"></div></div>
+      </div></form>`);
+    document.body.appendChild(form);
+    const doc = (n) => 'ISO-' + String(n).padStart(6, '0');
+    let start = 0, selected = -1;
+    const box = document.getElementById('keyrows'), grid = form.querySelector('[data-dyn-controlname=KeyGrid]');
+    const paint = () => {
+      box.style.height = (24 * BLOCK) + 'px'; box.innerHTML = '';
+      for (let i = start; i < Math.min(TOTAL, start + BLOCK); i++) {
+        const r = el(`<div role="row" aria-rowindex="${i + 2}" style="top:${24 * (i - start)}px">` +
+          cell('DocId', doc(i + 1)) + cell('Status', 'Open') + `</div>`);
+        if (i === selected) r.setAttribute('aria-selected', 'true');
+        box.appendChild(r);
+      }
+    };
+    box.addEventListener('mousedown', (ev) => {
+      const row = ev.target.closest('[role=row]'); if (!row) return;
+      selected = Number(row.getAttribute('aria-rowindex')) - 2; paint(); grid.focus();
+    });
+    grid.addEventListener('keydown', (ev) => {
+      const step = ev.key === 'ArrowDown' ? 1 : ev.key === 'PageDown' ? 10 : 0;
+      if (!step || selected < 0) return;
+      ev.preventDefault();
+      selected = Math.min(TOTAL - 1, selected + step);
+      if (selected >= start + BLOCK) later(300, () => { start = Math.min(TOTAL - BLOCK, selected - BLOCK + 1); paint(); });
+      else paint();
+    });
+    paint();
+  }
+
+  // the in-form WHS app simulator (action:WHSWorkExecute), markup as captured from D365 on 2026-10-23:
+  // a Dialog form with a .dialog-caption, a NonProductionNotification label, protocol controls by name,
+  // an `error` label for every message (painted red for info and errors alike)
+  if (location.search.includes('WHSWorkExecute')) {
+    const wdlg = el(`<form class="dialog-container" role="dialog" data-dyn-role="Dialog" data-dyn-form-name="WHSWorkExecute">
+      <div class="dialog-caption mainInstruction" id="whscap"></div>
+      <span data-dyn-controlname="NonProductionNotification" data-dyn-role="Label">This form is only intended for testing purposes and is not supported in production scenarios.</span>
+      <div data-dyn-controlname="controlGroup" data-dyn-role="Group" id="whsbody"></div></form>`);
+    document.body.appendChild(wdlg);
+    const label = (n, t, err) => `<span data-dyn-controlname="${n}" data-dyn-role="Label"${err ? ' style="background-color: rgb(255, 60, 60)"' : ''}>${t}</span>`;
+    const input = (n, t, pw) => `<div data-dyn-controlname="${n}" data-dyn-role="Input"><label>${t}</label><input${pw ? ' type="password"' : ''}></div>`;
+    const button = (n, t) => `<div data-dyn-controlname="${n}" data-dyn-role="CommandButton"><button type="button">${t}</button></div>`;
+    const PAGES = {
+      login: ['Login', () => input('UserId', 'User ID') + input('Password', 'Password', true) + button('Login', 'Login')],
+      main: ['Menu', () => label('Main', 'Main Menu') + button('Inbound', 'Inbound') + button('Log off', 'Log off')],
+      inbound: ['Menu', () => label('Inbound', 'Inbound') + button('DemoReceiving', 'OK') + button('Back', 'Back')],
+      s1: ['Demo receiving', () => label('DemoPageS1', 'Scan document or license plate') +
+            input('DemoScanId', 'Scan document or license plate') + button('OK', 'OK') + button('CancelExitProcess', 'Cancel')],
+      s5: ['Demo receiving', () => label('DemoPageS5', 'Scan item or barcode') + input('DemoItemScan', 'Scan item or barcode') +
+            button('OK', 'OK') + button('DemoLeaveDocument', 'Leave document')],
+      leave: ['Demo receiving', () => label('DemoPageLeave', 'Leave document') +
+            label('DemoLeaveDocumentQuestion', 'This document still has open lines. Leave it anyway?') +
+            button('DemoConfirmLeave', 'Leave document') + button('DemoBackToDocument', 'Back')],
+    };
+    let worker = '';
+    const show = (page, msg) => {
+      document.getElementById('whscap').textContent = PAGES[page][0];
+      document.getElementById('whsbody').innerHTML = (msg ? label('error', msg, true) : '') + PAGES[page][1]();
+      document.getElementById('whsbody').dataset.page = page;
+    };
+    const value = (n) => { const i = wdlg.querySelector(`[data-dyn-controlname="${n}"] input`); return i ? i.value : ''; };
+    const NEXT = {
+      'login/Login': () => ['WHSAPP05', 'WHSAPP06'].includes(value('UserId').toUpperCase()) && value('Password') === '1'
+        ? (worker = value('UserId').toUpperCase(), ['main']) : ['login', 'Login failed'],
+      'main/Inbound': () => ['inbound'], 'main/Log off': () => (worker = '', ['login']),
+      'inbound/DemoReceiving': () => ['s1'], 'inbound/Back': () => ['main'],
+      's1/OK': () => value('DemoScanId').trim().toUpperCase() === 'DOC-00000001' ? ['s5'] : ['s1', 'No inbound document found'],
+      's1/CancelExitProcess': () => ['inbound'],
+      's5/OK': () => ['s5', 'Receipt registered.'], 's5/DemoLeaveDocument': () => ['leave'],
+      'leave/DemoConfirmLeave': () => ['s1'], 'leave/DemoBackToDocument': () => ['s5'],
+    };
+    wdlg.addEventListener('click', (ev) => {
+      const b = ev.target.closest('[data-dyn-role=CommandButton]'); if (!b) return;
+      const step = NEXT[document.getElementById('whsbody').dataset.page + '/' + b.getAttribute('data-dyn-controlname')];
+      if (step) later(150, () => show(...step()));
+    });
+    show('login');
+  }
+</script>
+</body></html>

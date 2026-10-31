@@ -240,11 +240,21 @@ def control_plane_target(value):
     return f"{shown}:{int(port)}"
 
 
-def restricted_key(key, box, comment, control_plane):
+def maintenance_listen(port):
+    """Optional loopback port on this host forwarded back to the box's sshd (devbox-start -MaintenanceSshPort)."""
+    if port is None:
+        return ""
+    if type(port) is not int or not 1024 <= port <= 65535 or port in (18503, 18520, 18522, 18524, 18526):
+        raise ValueError("maintenance port must be a free unprivileged port")
+    return 'permitlisten="127.0.0.1:' + str(port) + '",'
+
+
+def restricted_key(key, box, comment, control_plane, maintenance_port=None):
     ipaddress.ip_address(box)
     target = control_plane_target(control_plane)
     return ('restrict,port-forwarding,from="' + box +
-            '",permitlisten="127.0.0.1:18520",permitlisten="127.0.0.1:18522",' +
+            '",permitlisten="127.0.0.1:18520",permitlisten="127.0.0.1:18522",permitlisten="127.0.0.1:18524",permitlisten="127.0.0.1:18526",' +
+            maintenance_listen(maintenance_port) +
             'permitopen="' + target + '" ' + key + " " + comment + "\n")
 
 
@@ -266,10 +276,12 @@ def private_directory(path, identity):
         os.chown(path, identity["uid"], identity["gid"])
 
 
-def setup(host, ledger, *, account, home, source, comment, box, control_plane, adopt=False):
+def setup(host, ledger, *, account, home, source, comment, box, control_plane, adopt=False,
+          maintenance_port=None):
     if not re.fullmatch(r"[a-z][a-z0-9-]{0,30}", account) or not re.fullmatch(r"[a-zA-Z0-9-]+", comment):
         raise ValueError("invalid account/comment")
     desired_box = str(ipaddress.ip_address(box))
+    maintenance_listen(maintenance_port)
     host.ssh_check()  # before account/key changes
     r = ledger.load()
     keys = home / ".ssh/authorized_keys"
@@ -329,7 +341,7 @@ def setup(host, ledger, *, account, home, source, comment, box, control_plane, a
     allowed = [v.encode() if v is not None else None for v in (r["installed"], r["next_installed"])]
     if raw not in allowed:
         raise ValueError("account key file changed; retained")
-    desired = restricted_key(r["key"], desired_box, comment, control_plane)
+    desired = restricted_key(r["key"], desired_box, comment, control_plane, maintenance_port)
     r["next_installed"] = desired; r["phase"] = "publishing-key"; ledger.save(r)
     if raw is not None:
         info = keys.lstat()
@@ -431,6 +443,8 @@ def main():
     p.add_argument("--comment", help="exact comment of the dev-box key; required for setup")
     p.add_argument("--control-plane", help="IP:PORT of the Crocodile control plane the box may reach; required for setup")
     p.add_argument("--box", help="current dev-box source IP; required for setup")
+    p.add_argument("--maintenance-port", type=int,
+                   help="optional: also allow the box to listen on 127.0.0.1:PORT here (its sshd, for maintenance)")
     p.add_argument("--adopt-account", action="store_true")
     p.add_argument("--services", nargs="+")
     p.add_argument("--restore-source", action="store_true")
@@ -459,7 +473,7 @@ def main():
         if a.action == "setup":
             answer = setup(host, ledger, account=a.account, home=a.home, source=a.source_keys,
                            comment=a.comment, box=a.box, control_plane=a.control_plane,
-                           adopt=a.adopt_account)
+                           adopt=a.adopt_account, maintenance_port=a.maintenance_port)
         elif a.action == "claim-services":
             if not a.services:
                 p.error("claim-services needs explicit --services names")

@@ -1,0 +1,5 @@
+HTTP 500 {
+  "Message": "An exception occured when invoking the operation - Unexpected difference between request and session data. Warehouse Mobile Devices XML protocol violated. REQUEST_XML_TAMPERING",
+  "ExceptionType": "ErrorException",
+  "ActivityId": "scrubbed"
+}

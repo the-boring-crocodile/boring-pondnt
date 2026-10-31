@@ -1,0 +1,27 @@
+// Connection view for WORKING_WITH_PONDNT.md. Render with Graphviz dot.
+// Groups of services are shown as groups, not single processes.
+digraph routes {
+graph [rankdir=TB, newrank=true, splines=line, nodesep=0.55, ranksep=0.7,
+ bgcolor="#ffffff", pad=0.25, fontname="Helvetica", fontsize=10, labelloc=t, labeljust=l,
+ label=<<TABLE BORDER="0" CELLSPACING="6"><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="18"><B>Two routes, one D365 environment</B></FONT></TD></TR><TR><TD ALIGN="LEFT">Connection view · supported composition · 2026-10-30</TD></TR><TR><TD ALIGN="LEFT">Separate endpoints do not isolate the underlying development work.</TD></TR></TABLE>>];
+node [shape=box,style=filled,fillcolor="#edf5ef",color="#7a9783",fontcolor="#111111",
+ fontname="Helvetica",fontsize=10,width=2.95,height=1.05,fixedsize=true,margin="0.16,0.1"];
+edge [arrowsize=0.7,penwidth=1.4,color="#587b96",fontname="Helvetica",fontsize=10];
+ pond [fillcolor="#edf2fa",color="#7489a5",label=<<TABLE BORDER="0" CELLSPACING="4"><TR><TD ALIGN="LEFT" WIDTH="183"><FONT POINT-SIZE="12"><B>Remote assistant's Pond</B></FONT></TD></TR><TR><TD ALIGN="LEFT">[Workspace · Linux account]</TD></TR><TR><TD ALIGN="LEFT">Calls granted Windows services</TD></TR></TABLE>>];
+ copilot [fillcolor="#edf2fa",color="#7489a5",label=<<TABLE BORDER="0" CELLSPACING="4"><TR><TD ALIGN="LEFT" WIDTH="183"><FONT POINT-SIZE="12"><B>Visual Studio Copilot</B></FONT></TD></TR><TR><TD ALIGN="LEFT">[Client · Windows / Visual Studio]</TD></TR><TR><TD ALIGN="LEFT">Calls local MCP endpoints</TD></TR></TABLE>>];
+ remote [label=<<TABLE BORDER="0" CELLSPACING="4"><TR><TD ALIGN="LEFT" WIDTH="183"><FONT POINT-SIZE="12"><B>Tunnel service endpoints</B></FONT></TD></TR><TR><TD ALIGN="LEFT">[Service group · Windows]</TD></TR><TR><TD ALIGN="LEFT">Own identities and job records</TD></TR></TABLE>>];
+ local [label=<<TABLE BORDER="0" CELLSPACING="4"><TR><TD ALIGN="LEFT" WIDTH="183"><FONT POINT-SIZE="12"><B>Local service endpoints</B></FONT></TD></TR><TR><TD ALIGN="LEFT">[Service group · Windows]</TD></TR><TR><TD ALIGN="LEFT">Core, Ferry and its backends</TD></TR></TABLE>>];
+ env [fillcolor="#f5f5f3",color="#8c8d87",label=<<TABLE BORDER="0" CELLSPACING="4"><TR><TD ALIGN="LEFT" WIDTH="183"><FONT POINT-SIZE="12"><B>Shared development target</B></FONT></TD></TR><TR><TD ALIGN="LEFT">[D365 instance · Windows VM]</TD></TR><TR><TD ALIGN="LEFT">Source, build outputs and AxDB</TD></TR></TABLE>>];
+ {rank=same;remote;local;}
+{rank=same;pond;copilot;}
+pond -> remote [style=dashed,label="MCP via SSH tunnel"];
+copilot -> local [label="local MCP / HTTP"];
+remote -> env [color="#6b706d",label="development operations"];
+local -> env [color="#6b706d",label="development operations"];
+key [shape=plain,style="",fixedsize=false,label=<<TABLE BORDER="0" CELLSPACING="12" CELLPADDING="0"><TR>
+<TD ALIGN="LEFT" VALIGN="TOP"><B>Read the boxes</B><BR ALIGN="LEFT"/>Blue: callers<BR ALIGN="LEFT"/>Sage: service groups<BR ALIGN="LEFT"/>Grey: shared target<BR ALIGN="LEFT"/>Locations shown in each box<BR ALIGN="LEFT"/></TD>
+<TD ALIGN="LEFT" VALIGN="TOP"><B>Read the arrows</B><BR ALIGN="LEFT"/>Caller to callee<BR ALIGN="LEFT"/>Dashed: tunnelled calls<BR ALIGN="LEFT"/>Windows opens SSH outward;<BR ALIGN="LEFT"/>calls travel back through it.<BR ALIGN="LEFT"/></TD>
+<TD ALIGN="LEFT" VALIGN="TOP"><B>Scope</B><BR ALIGN="LEFT"/>Auth and Knowledge omitted.<BR ALIGN="LEFT"/>Distinct browser profiles required.<BR ALIGN="LEFT"/>Coordinate writes and fixtures;<BR ALIGN="LEFT"/>no cross-client coordination.<BR ALIGN="LEFT"/></TD>
+</TR></TABLE>>];
+env -> key [style=invis,weight=100];
+}

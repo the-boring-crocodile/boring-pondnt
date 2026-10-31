@@ -1,0 +1,31 @@
+<!doctype html>
+<!-- A tab owns its header; its content also contains an independently clickable record link. -->
+<html><head><meta charset="utf-8"><title>Tab target fixture</title><style>
+body { margin:0;font:14px sans-serif; } form { width:900px;height:650px; }
+#tab { padding:10px;width:700px;min-height:180px; }
+#header { display:block;width:300px;height:35px; }
+#content { padding:24px; } input { width:200px; }
+</style></head><body>
+<form data-dyn-role="Form" data-dyn-form-name="TabFixture">
+ <div data-dyn-role="TabPage" data-dyn-controlname="UsersTabPage" id="tab">
+  <button type="button" role="tab" aria-expanded="true" id="header">User mappings</button>
+  <div id="content">
+   <input data-dyn-role="Input" data-dyn-controlname="LinkedUser" class="dyn-hyperlink" id="linked" value="test-user" readonly>
+   <button type="button" id="bodyAction">Unrelated body action</button>
+  </div>
+ </div>
+ <div data-dyn-role="Input" data-dyn-controlname="Result"><input id="result" readonly value=""></div>
+</form>
+<script>
+window.$dyn={clientBusy:()=>false};
+document.getElementById('header').onclick=()=>{
+ const h=document.getElementById('header');
+ h.setAttribute('aria-expanded',String(h.getAttribute('aria-expanded')!=='true'));
+ document.getElementById('result').value='header';
+};
+document.getElementById('linked').onclick=()=>{
+ document.getElementById('result').value='linked-user';
+ document.querySelector('form').setAttribute('data-dyn-form-name','LinkedUserForm');
+};
+document.getElementById('bodyAction').onclick=()=>{document.getElementById('result').value='body-action';};
+</script></body></html>

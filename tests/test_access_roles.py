@@ -49,7 +49,8 @@ class RoleD365(RoleService):
                                            xref_index=self.xref_index,
                                            sql_connect=lambda database, timeout: self.connect_sql, **auth)
         session, jobs = server._d365_session, server._d365_jobs
-        session.call = lambda script, **kwargs: self.record.append(script) or []
+        session.call = lambda script, **kwargs: (self.record.append(script)
+                                                 or (([], []) if kwargs.get("with_host") else []))
         session.ensure_ready = lambda: None
         jobs.start = lambda kind, script, **kwargs: self.record.append(f"job:{kind}") or {"job_id": "x"}
         jobs.stop = lambda job_id: self.record.append(f"stop:{job_id}") or {}
@@ -176,7 +177,8 @@ def test_a_writer_writes_runs_and_controls_jobs(tmp_path):
 def test_d365_reader_is_refused_admin_build_sql_and_jobs(tmp_path, index):  # noqa: F811
     async def scenario() -> None:
         async with RoleD365(tmp_path, "reader", index) as service:
-            for tool, arguments in (("d365_environment", {"action": "stop", "services": "aos"}),
+            for tool, arguments in (("d365_run", {"command": "Stop-D365Environment -Aos"}),
+                                    ("d365_run", {"command": "Get-D365Model", "background": True}),
                                     ("d365_sql", {"sql": "DELETE FROM SalesTable"}),
                                     ("d365_build", {"module": "ContosoExt"}),
                                     ("d365_db_sync", {}),
@@ -184,8 +186,8 @@ def test_d365_reader_is_refused_admin_build_sql_and_jobs(tmp_path, index):  # no
                                     ("d365_job", {"job_id": "x", "stop": True})):
                 assert forbidden(await service.result(tool, arguments)), tool
             assert service.record == []  # no PowerShell script, SQL connection or job was started
-            for tool, arguments in (("d365_status", {}), ("xref_info", {}),
-                                    ("xref_names", {"name": "ContosoBase"})):
+            for tool, arguments in (("xref", {"what": "info"}),
+                                    ("xref", {"what": "names", "name": "ContosoBase"})):
                 is_error, data = await service.result(tool, arguments)
                 assert not is_error, (tool, data)
     run(scenario())
@@ -196,9 +198,8 @@ def test_d365_reader_is_refused_admin_build_sql_and_jobs(tmp_path, index):  # no
 CORE_WRITER = {"file_write", "file_patch", "file_write_bytes", "exec", "job_start", "job_stop"}
 CORE_READER = {"bootstrap", "file_read", "file_read_bytes", "file_list", "file_search",
                "job_list", "job_wait", "job_output", "batch"}
-D365_WRITER = {"d365_environment", "d365_sql", "d365_build", "d365_db_sync", "d365_best_practice", "d365_job"}
-D365_READER = {"d365_status", "d365_models", "d365_results",
-               "xref_info", "xref_names", "xref_references", "xref_hierarchy"}
+D365_WRITER = {"d365_run", "d365_sql", "d365_build", "d365_db_sync", "d365_best_practice", "d365_job"}
+D365_READER = {"d365_results", "xref"}
 
 
 def test_every_tool_is_classified(tmp_path, index):  # noqa: F811
@@ -221,8 +222,7 @@ def test_every_tool_is_classified(tmp_path, index):  # noqa: F811
 def test_d365_writer_dispatches(tmp_path, index):  # noqa: F811
     async def scenario() -> None:
         async with RoleD365(tmp_path, "writer", index) as service:
-            # d365_environment is refused under a Pond call budget; this server has none.
-            is_error, data = await service.result("d365_environment", {"action": "stop", "services": "aos"})
+            is_error, data = await service.result("d365_run", {"command": "Stop-D365Environment -Aos"})
             assert not is_error, data
             is_error, data = await service.result("d365_build", {"module": "ContosoExt"})
             assert not is_error, data

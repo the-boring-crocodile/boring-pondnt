@@ -89,7 +89,7 @@ changes is part of good engineering.
 ## Authority and care
 
 Follow the actual environment's system, organization, repository and access
-rules. This kit does not grant permission to deploy, publish, delete unique
+rules. This handbook does not grant permission to deploy, publish, delete unique
 data, change shared production state or contact other people. Existing
 authorization remains valid within its scope; do not invent extra approval
 ceremonies for reversible routine work.

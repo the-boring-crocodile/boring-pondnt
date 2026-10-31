@@ -92,7 +92,7 @@ def test_argument_errors_are_one_short_line():
 
 def test_bootstrap_with_and_without_kit(tmp_path):
     is_error, data = call(create_server(), "bootstrap", {})
-    assert not is_error and data["kit"] is None and data["version"]
+    assert not is_error and data["handbook"] is None and data["version"]
     kit = tmp_path / "kit"
     kit.mkdir()
     (kit / "bootstrap.md").write_bytes(b"\xef\xbb\xbf# Start\r\nRead agreement.md.\r\n")
@@ -100,7 +100,7 @@ def test_bootstrap_with_and_without_kit(tmp_path):
     is_error, data = call(create_server(kit), "bootstrap", {})
     assert not is_error
     assert data["bootstrap"].startswith("# Start")
-    assert [p.endswith("agreement.md") for p in data["kit_files"]] == [True]
+    assert [p.endswith("agreement.md") for p in data["handbook_files"]] == [True]
 
 
 def test_no_stdio_any_more():
@@ -209,10 +209,15 @@ def test_every_required_parameter_is_published():
         assert set(tool.input_schema.get("required", [])) <= set(tool.input_schema["properties"]), tool.name
 
 
-@pytest.mark.parametrize("method", ["xref-names", "xref_names", "d365_build"])
+@pytest.mark.parametrize("method", ["xref-names", "xref_names", "xref", "d365_build", "d365_run"])
 def test_batch_names_the_d365_server_for_its_tools(tmp_path, method):
     # Copilot put "xref-names" into a core batch on a dev VM.
     server = create_server(state_dir=tmp_path / "state")
     is_error, data = batch(server, [{"id": "a", "method": method, "arguments": {}}])
     assert is_error and data["code"] == "invalid_request"
     assert "d365 server" in json.dumps(data) and "call it directly" in json.dumps(data)
+
+
+def test_tool_schemas_are_strict_for_copilot():
+    from strict_schema import assert_copilot_accepts
+    assert_copilot_accepts(asyncio.run(create_server().list_tools()))

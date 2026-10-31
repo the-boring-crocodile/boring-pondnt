@@ -154,7 +154,7 @@ def test_many_names_are_queried_in_chunks(index, monkeypatch):
 def test_reference_refusals(index):
     with pytest.raises(Refused) as missing:
         index.references("/Classes/Nope")
-    assert missing.value.code == "not_found" and "xref_names" in missing.value.message
+    assert missing.value.code == "not_found" and "what=names" in missing.value.message
     for kwargs in ({"kind": "reads"}, {"direction": "sideways"}, {"limit": 0}, {"offset": -1}):
         with pytest.raises(Refused):
             index.references("/Classes/ContosoBase", **kwargs)
@@ -200,15 +200,30 @@ def call(server, name, args=None):
 
 def test_server_has_four_small_read_only_tools(index, tmp_path):
     server = create_server(state_dir=tmp_path, start_session=False, xref_index=index)
-    tools = [t for t in asyncio.run(server.list_tools()) if t.name.startswith("xref_")]
-    assert sorted(t.name for t in tools) == ["xref_hierarchy", "xref_info", "xref_names", "xref_references"]
+    tools = [t for t in asyncio.run(server.list_tools()) if t.name.startswith("xref")]
+    assert [t.name for t in tools] == ["xref"]  # D40: one tool for the four lookups
     assert all(len(t.description or "") <= 120 and t.annotations.read_only_hint for t in tools)
-    is_error, data = call(server, "xref_references", {"path": "@SYS7149", "direction": "used_by"})
+    is_error, data = call(server, "xref", {"what": "references", "path": "@SYS7149", "direction": "used_by"})
     assert not is_error and data["total"] == 2
     with pytest.raises(ToolError, match="unknown: sql"):
-        call(server, "xref_references", {"path": "@SYS7149", "sql": "DROP"})
-    is_error, data = call(server, "xref_names", {"name": "/Classes/*Base"})
+        call(server, "xref", {"what": "references", "path": "@SYS7149", "sql": "DROP"})
+    is_error, data = call(server, "xref", {"what": "names", "name": "/Classes/*Base"})
     assert is_error and data["code"] == "invalid_request"
+
+
+def test_one_xref_tool_dispatches_and_names_what_each_lookup_needs(index, tmp_path):
+    server = create_server(state_dir=tmp_path, start_session=False, xref_index=index)
+    is_error, data = call(server, "xref", {"what": "info"})
+    assert not is_error and "names" in json.dumps(data)
+    is_error, data = call(server, "xref", {"what": "names", "name": "ContosoBase"})
+    assert not is_error and data["names"]
+    is_error, data = call(server, "xref", {"what": "hierarchy", "name": "ContosoBase"})
+    assert not is_error and data["direction"] == "down"
+    for args, needs in (({"what": "names"}, "needs name"), ({"what": "references", "name": "x"}, "not name"),
+                        ({"what": "info", "limit": 5}, "not limit"), ({"what": "hierarchy", "path": "/x"}, "needs name"),
+                        ({"what": "everything"}, "info, names, references, hierarchy")):
+        is_error, data = call(server, "xref", args)
+        assert is_error and data["code"] == "invalid_request" and needs in data["message"], (args, data)
 
 
 def test_pages_neither_skip_nor_repeat_under_a_case_insensitive_collation(tmp_path):
@@ -279,7 +294,7 @@ def test_no_xref_query_starts_after_the_calls_budget(db, tmp_path):
     server = create_server(state_dir=tmp_path, start_session=False, xref_index=index, call_budget=0.6)
     try:
         # used_by needs three queries (names, totals, rows): the third would start at ~0.8 s.
-        is_error, data = call(server, "xref_references", {"path": "/Classes/ContosoBase"})
+        is_error, data = call(server, "xref", {"what": "references", "path": "/Classes/ContosoBase"})
         assert is_error and data["code"] == "timeout" and "before its next query" in data["message"]
         assert len(sent) == 2
         sent.clear()

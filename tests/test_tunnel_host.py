@@ -230,9 +230,39 @@ def test_control_plane_is_explicit_and_canonical():
     assert tool.control_plane_target("[2001:db8::1]:443") == "[2001:db8::1]:443"
     line = tool.restricted_key("ssh-ed25519 AAAA", "192.0.2.1", "c", "198.51.100.7:18503")
     assert 'permitopen="198.51.100.7:18503"' in line
+    for port in (18520, 18522, 18524, 18526):  # devbox, -d365, -d365whsapp, -d365web (tools/devbox-start.ps1)
+        assert f'permitlisten="127.0.0.1:{port}"' in line
     for bad in ("host.example:18503", "198.51.100.7", "198.51.100.7:0", "198.51.100.7:x"):
         with pytest.raises(ValueError):
             tool.control_plane_target(bad)
+
+
+def test_maintenance_port_is_optional_and_checked():
+    plain = tool.restricted_key("ssh-ed25519 AAAA", "192.0.2.1", "c", "198.51.100.7:18503")
+    assert "2222" not in plain
+    line = tool.restricted_key("ssh-ed25519 AAAA", "192.0.2.1", "c", "198.51.100.7:18503", 2222)
+    assert 'permitlisten="127.0.0.1:2222"' in line and line.startswith("restrict,port-forwarding,")
+    for bad in (22, 80, 18503, 18526, 70000, "2222", True):
+        with pytest.raises(ValueError):
+            tool.restricted_key("ssh-ed25519 AAAA", "192.0.2.1", "c", "198.51.100.7:18503", bad)
+
+
+def test_moving_the_box_with_a_maintenance_port(fixture):
+    host, ledger, args = setup(fixture)
+    keys = args["home"] / ".ssh/authorized_keys"
+    with ledger.lock(), pytest.raises(ValueError):
+        tool.setup(host, ledger, **{**args, "box": "192.0.2.9"}, maintenance_port=22)
+    assert b'from="192.0.2.1"' in keys.read_bytes()  # a bad port changes nothing
+    with ledger.lock():
+        tool.setup(host, ledger, **{**args, "box": "192.0.2.9"}, maintenance_port=2222)
+    raw = keys.read_bytes()
+    assert b'from="192.0.2.9"' in raw and b'permitlisten="127.0.0.1:2222"' in raw and raw.count(b"\n") == 1
+
+
+def test_devbox_start_maintenance_forward_is_opt_in():
+    text = (ROOT / "tools/devbox-start.ps1").read_text()
+    assert "[int]$MaintenanceSshPort = 0" in text
+    assert "if ($MaintenanceSshPort)" in text and ":127.0.0.1:22'" in text
 
 
 # --- the Crocodile's admin executable -----------------------------------------
@@ -296,3 +326,17 @@ def test_host_resolves_admin_only_when_service_authority_is_needed(tmp_path, mon
     admin = executable(tmp_path / "bin/boring-crocodile-admin")
     assert tool.Host(admin).services() == []
     assert ran == [(str(admin), "service-list")]
+
+
+def test_devbox_start_record_accepts_every_started_service():
+    """A started service the record validator does not know breaks every later start (seen live
+    after adding devbox-d365whsapp): the port table and the accepted entry names must agree."""
+    import re
+    text = (Path(__file__).parents[1] / "tools" / "devbox-start.ps1").read_text(encoding="utf-8")
+    ports = re.search(r"\$ports = \[ordered\]@\{(.*?)\}", text).group(1)
+    started = set(re.findall(r"'([a-z0-9-]+)'\s*=\s*\d+", ports))
+    accepted = set(re.findall(r"'([a-z0-9-]+)'", re.search(r"\$entry\.name -notin @\((.*?)\)", text).group(1)))
+    assert started == {"devbox", "devbox-d365", "devbox-d365whsapp", "devbox-d365web"}
+    assert started | {"tunnel"} == accepted
+    for port in re.findall(r"=\s*(\d+)", ports):
+        assert f"'127.0.0.1:{port}:127.0.0.1:{port}'" in text  # each port is forwarded

@@ -2,7 +2,13 @@
 [CmdletBinding()]
 param([string]$Release, [string[]]$Only, [switch]$Stop, [string]$CiRoot='C:\temp\ci',
       # Needed only for the tunnel: account@host of the tunnel endpoint and IP:PORT of the control plane there.
-      [string]$TunnelHost, [string]$ControlPlane)
+      [string]$TunnelHost, [string]$ControlPlane,
+      # Optional, tunnel only: also forward 127.0.0.1:PORT on the tunnel host to this box's sshd (port 22),
+      # for maintenance when the box has no other way in (tunnel-account.sh --maintenance-port PORT). 0 = off.
+      [int]$MaintenanceSshPort = 0,
+      # Tunnel only, for a repeating task: start the tunnel again if its recorded process has ended
+      # (the box slept, the network dropped); a running tunnel and every service are left alone.
+      [switch]$EnsureTunnel)
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'maintenance-state.ps1')
 
@@ -21,8 +27,11 @@ function Assert-PrivateDevboxCredentials([string]$Root) {
         $owner = ([Security.Principal.NTAccount]$acl.Owner).Translate([Security.Principal.SecurityIdentifier]).Value
         if ($owner -notin $allowed) { throw 'Credential tree has an unexpected owner.' }
         foreach ($rule in $acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier])) {
+            # OWNER RIGHTS (S-1-3-4) only limits what the owner may do; it never grants access to
+            # anyone else. pondNT's own d365 job folders carry it (seen 2026-10-29/30).
             if ($rule.AccessControlType -eq [Security.AccessControl.AccessControlType]::Allow -and
-                $rule.IdentityReference.Value -notin $allowed) {
+                $rule.IdentityReference.Value -notin $allowed -and
+                $rule.IdentityReference.Value -ne 'S-1-3-4') {
                 throw 'Credential tree grants access outside the current administrator, SYSTEM and Administrators; provision private ACLs before starting.'
             }
         }
@@ -45,7 +54,7 @@ function Read-DevboxRecord([string]$Path) {
     $seen = @{}
     foreach ($entry in @($data.entries)) {
         if (@($entry.PSObject.Properties.Name).Count -ne 6 -or
-            $entry.name -notin @('devbox','devbox-d365','tunnel') -or
+            $entry.name -notin @('devbox','devbox-d365','devbox-d365whsapp','devbox-d365web','tunnel') -or
             $entry.state -notin @('starting','running','stopping','stopped') -or
             $entry.executable -isnot [string] -or -not $entry.executable -or
             $entry.commandline -isnot [string] -or -not $entry.commandline -or
@@ -142,18 +151,99 @@ function Start-DevboxEntry([string]$Name, [string]$Executable, [string[]]$Argume
     }
 }
 
+function Start-DevboxTunnel([string]$CiRoot, [string]$RecordPath, $Record) {
+    if (-not $TunnelHost -or -not $ControlPlane) { throw 'The tunnel needs -TunnelHost account@host and -ControlPlane IP:PORT.' }
+    if ($TunnelHost -notmatch '^[a-z_][a-z0-9_-]*@[A-Za-z0-9.-]+$') { throw '-TunnelHost must be account@host.' }
+    if ($ControlPlane -notmatch '^(\d{1,3}(\.\d{1,3}){3}|\[[0-9A-Fa-f:]+\]):\d{1,5}$') { throw '-ControlPlane must be IP:PORT.' }
+    foreach ($file in @('ssh\id_ed25519','ssh\known_hosts')) {
+        if (-not (Test-Path -LiteralPath (Join-Path $CiRoot $file) -PathType Leaf)) { throw 'Missing operator-provisioned SSH file.' }
+    }
+    $sshExecutable = (Get-Command ssh.exe -CommandType Application -ErrorAction Stop).Source
+    # Keepalives make a dead session (after the box slept, or the network dropped) end within about
+    # 90 s, so -EnsureTunnel sees the process gone and dials again.
+    $ssh = @('-F','none','-i',(Join-Path $CiRoot 'ssh\id_ed25519'),'-o','IdentitiesOnly=yes',
+             '-o',('UserKnownHostsFile=' + (Join-Path $CiRoot 'ssh\known_hosts')),
+             '-N','-o','ExitOnForwardFailure=yes','-o','ServerAliveInterval=30','-o','ServerAliveCountMax=3',
+             '-o','ConnectTimeout=15',
+             '-R','127.0.0.1:18520:127.0.0.1:18520','-R','127.0.0.1:18522:127.0.0.1:18522',
+             '-R','127.0.0.1:18524:127.0.0.1:18524','-R','127.0.0.1:18526:127.0.0.1:18526',
+             '-L',('127.0.0.1:18503:' + $ControlPlane))
+    if ($MaintenanceSshPort) {
+        if ($MaintenanceSshPort -lt 1024 -or $MaintenanceSshPort -gt 65535) { throw '-MaintenanceSshPort must be 1024-65535.' }
+        $ssh += @('-R',('127.0.0.1:' + $MaintenanceSshPort + ':127.0.0.1:22'))
+    }
+    $ssh += @($TunnelHost)
+    return (Start-DevboxEntry 'tunnel' $sshExecutable $ssh $CiRoot $RecordPath $Record)
+}
+
+function Resolve-DevboxTunnel($Record, [string]$RecordPath) {
+    # The tunnel's recorded state for -EnsureTunnel: 'running' (its process is there and still ours),
+    # 'absent' (never started, stopped, or its process ended; an ended one is recorded as stopped).
+    # An unresolved start, a stop in progress whose process still runs, or a reused PID refuse.
+    $entry = @($Record.entries | Where-Object { $_.name -eq 'tunnel' }) | Select-Object -First 1
+    if (-not $entry -or $entry.state -eq 'stopped') { return 'absent' }
+    if ($entry.state -eq 'starting') { throw 'Unresolved earlier tunnel start; review the process record.' }
+    $process = Get-DevboxProcess $entry.pid
+    # A PID taken over by a process started later is not ours: the recorded tunnel has ended.
+    if ($process -and $process.StartTime.ToUniversalTime().Ticks.ToString() -cne $entry.created) { $process = $null }
+    if ($process) {
+        Assert-DevboxIdentity $entry $process
+        if ($entry.state -eq 'stopping') { throw 'A stop of the tunnel is in progress; not restarted.' }
+        return 'running'
+    }
+    $entry.state = 'stopped'
+    Write-MaintenanceRecord $RecordPath $Record
+    return 'absent'
+}
+
+function Read-DevboxAccess([string]$Root) {
+    # Who may call the devbox services besides the Pond `pond` (D39): devbox-callers.json next to the
+    # credentials, e.g. [{"subject": "tim", "role": "writer"}], the same list for every devbox service.
+    # The file sits in the private credential tree (Assert-PrivateDevboxCredentials). The Crocodile must
+    # grant the same Ponds (service-grants); this list is the services' own half.
+    $access = @([ordered]@{ subject = 'pond'; role = 'writer'; author = 'pond' })
+    $file = Join-Path $Root 'devbox-callers.json'
+    if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { return ,$access }
+    $parsed = Get-Content -Raw -LiteralPath $file | ConvertFrom-Json
+    $seen = @('pond')
+    foreach ($caller in $parsed) {
+        $names = @($caller.PSObject.Properties.Name)
+        if (@($names | Where-Object { $_ -notin @('subject','role') }).Count -or
+            $caller.subject -isnot [string] -or $caller.subject -cnotmatch '^[a-z][a-z0-9_-]{0,31}$' -or
+            $caller.subject -in $seen -or $caller.role -notin @('reader','writer')) {
+            throw 'devbox-callers.json: each entry is {"subject": a lower-case Pond name other than pond, given once, "role": "reader" or "writer"}.'
+        }
+        $seen += $caller.subject
+        $access += [ordered]@{ subject = $caller.subject; role = $caller.role; author = $caller.subject }
+    }
+    return ,$access
+}
+
 if ($MyInvocation.InvocationName -eq '.') { return } # fixture loads functions only
 
 $ci = [IO.Path]::GetFullPath($CiRoot)
 $recordPath = Join-Path $ci 'devbox-processes.json'
+if ($EnsureTunnel -and ($Stop -or $Only)) { throw '-EnsureTunnel takes neither -Stop nor -Only.' }
 if (-not $Stop) { Assert-PrivateDevboxCredentials $ci }
 $lock = Open-MaintenanceLock $recordPath
 try {
     $record = Read-DevboxRecord $recordPath
-    $names = @('devbox','devbox-d365')
+    if ($EnsureTunnel) {
+        if ((Resolve-DevboxTunnel $record $recordPath) -eq 'running') { 'Tunnel running; nothing to do.'; return }
+        $null = Start-DevboxTunnel $ci $recordPath $record
+        'Tunnel was not running; started again and recorded.'
+        return
+    }
+    # name -> Pond-facing port and module. devbox-d365whsapp and devbox-d365web start only when their
+    # configuration file (d365whsapp.json, d365web.json) exists next to their credentials.
+    $ports = [ordered]@{ 'devbox' = 18520; 'devbox-d365' = 18522; 'devbox-d365whsapp' = 18524; 'devbox-d365web' = 18526 }
+    $modules = @{ 'devbox' = 'boring_pondnt.server'; 'devbox-d365' = 'boring_pondnt.d365_server'
+                  'devbox-d365whsapp' = 'boring_pondnt.d365whsapp_server'; 'devbox-d365web' = 'boring_pondnt.d365web_server' }
+    $configs = @{ 'devbox-d365whsapp' = 'd365whsapp'; 'devbox-d365web' = 'd365web' }
+    $names = @($ports.Keys)
     if ($Only) {
         $names = @($Only | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
-        if (@($names | Where-Object { $_ -notin @('devbox','devbox-d365') }).Count) { throw 'Unknown -Only service.' }
+        if (@($names | Where-Object { $_ -notin @($ports.Keys) }).Count) { throw 'Unknown -Only service.' }
     } else { $names += 'tunnel' }
     $selected = @($record.entries | Where-Object { $_.name -in $names })
     # Establish every selected ownership proof before stopping any process.
@@ -168,26 +258,16 @@ try {
         if (-not $Release) { throw '-Release is required when starting.' }
         $python = [IO.Path]::GetFullPath((Join-Path $Release 'python\python.exe'))
         if (-not (Test-Path -LiteralPath $python -PathType Leaf)) { throw 'Release has no python.exe.' }
-        $sshExecutable = (Get-Command ssh.exe -CommandType Application -ErrorAction Stop).Source
+        if ('tunnel' -in $names) { $null = Get-Command ssh.exe -CommandType Application -ErrorAction Stop }
     }
     foreach ($entry in $selected) { Stop-DevboxEntry $entry $recordPath $record }
     if ($Stop) { 'Recorded selected processes stopped; unrecorded processes retained.'; return }
     $env:PYTHONUTF8 = '1'
     if ('tunnel' -in $names) {
-        if (-not $TunnelHost -or -not $ControlPlane) { throw 'The tunnel needs -TunnelHost account@host and -ControlPlane IP:PORT.' }
-        if ($TunnelHost -notmatch '^[a-z_][a-z0-9_-]*@[A-Za-z0-9.-]+$') { throw '-TunnelHost must be account@host.' }
-        if ($ControlPlane -notmatch '^(\d{1,3}(\.\d{1,3}){3}|\[[0-9A-Fa-f:]+\]):\d{1,5}$') { throw '-ControlPlane must be IP:PORT.' }
-        foreach ($file in @('ssh\id_ed25519','ssh\known_hosts')) {
-            if (-not (Test-Path -LiteralPath (Join-Path $ci $file) -PathType Leaf)) { throw 'Missing operator-provisioned SSH file.' }
-        }
-        $ssh = @('-F','none','-i',(Join-Path $ci 'ssh\id_ed25519'),'-o','IdentitiesOnly=yes',
-                 '-o',('UserKnownHostsFile=' + (Join-Path $ci 'ssh\known_hosts')),
-                 '-N','-o','ExitOnForwardFailure=yes','-o','ServerAliveInterval=30',
-                 '-R','127.0.0.1:18520:127.0.0.1:18520','-R','127.0.0.1:18522:127.0.0.1:18522',
-                 '-L',('127.0.0.1:18503:' + $ControlPlane),$TunnelHost)
-        $null = Start-DevboxEntry 'tunnel' $sshExecutable $ssh $ci $recordPath $record
+        $null = Start-DevboxTunnel $ci $recordPath $record
         'Tunnel process started and recorded; network readiness still requires acceptance.'
     }
+    $access = Read-DevboxAccess $ci
     foreach ($name in @($names | Where-Object { $_ -ne 'tunnel' })) {
         $id = Join-Path $ci ($name + '-id'); $secret = Join-Path $ci ($name + '-secret')
         if (-not ((Test-Path -LiteralPath $id -PathType Leaf) -and (Test-Path -LiteralPath $secret -PathType Leaf))) {
@@ -197,10 +277,15 @@ try {
         if (-not $clientId) { throw 'Empty client identity file.' }
         $state = Join-Path $ci ('state-' + $name)
         $null = New-Item -ItemType Directory -Force -Path $state
-        $port = if ($name -eq 'devbox') {18520} else {18522}
-        $module = if ($name -eq 'devbox') {'boring_pondnt.server'} else {'boring_pondnt.d365_server'}
-        $arguments = @('-m',$module)
-        if ($name -eq 'devbox-d365') { $arguments += 'serve' }
+        $port = $ports[$name]
+        $arguments = @('-m',$modules[$name])
+        if ($name -ne 'devbox') { $arguments += 'serve' }
+        if ($configs.ContainsKey($name)) {
+            $kind = $configs[$name]
+            $file = Join-Path $ci ($kind + '.json')
+            if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { "$name has no $kind.json; not started."; continue }
+            $arguments += @(('--' + $kind),$file)
+        }
         # A family service of the Pond: the Crocodile's introspection and registration through the
         # tunnel, the Pond "pond" its only caller (boring-service-kit ServiceConfig).
         $service = [ordered]@{
@@ -208,7 +293,7 @@ try {
             oauth = [ordered]@{ issuer = 'http://127.0.0.1:18503'; introspection_url = 'http://127.0.0.1:18503/introspect'
                                 client_id = $clientId; secret_file = $secret }
             pond = [ordered]@{ url = 'http://127.0.0.1:18503'; client_id = $clientId; secret_file = $secret }
-            access = @([ordered]@{ subject = 'pond'; role = 'writer'; author = 'pond' })
+            access = $access
         }
         $config = Join-Path $state 'config.json'
         [IO.File]::WriteAllText($config, ($service | ConvertTo-Json -Depth 4), (New-Object Text.UTF8Encoding $false))

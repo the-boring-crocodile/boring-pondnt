@@ -21,7 +21,7 @@ _, develop = load()
 ROOT = Path(__file__).resolve().parents[1]
 
 
-SERVICE_PACKAGES = ("sourcecache-d365", "knowledge", "canvas")
+SERVICE_PACKAGES = ("sourcecache-d365", "knowledge", "canvas", "mcp-ferry")
 
 
 def main():

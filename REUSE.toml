@@ -13,6 +13,6 @@ SPDX-FileCopyrightText = "2026 Wald and the boring-pondnt contributors"
 SPDX-License-Identifier = "CC-BY-SA-4.0"
 
 [[annotations]]
-path = ["kit/**"]
+path = ["handbook/**"]
 SPDX-FileCopyrightText = "2026 Wald and the boring-pondnt contributors"
 SPDX-License-Identifier = "CC0-1.0"

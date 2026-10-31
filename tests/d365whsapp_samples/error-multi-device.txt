@@ -1,0 +1,5 @@
+HTTP 500 {
+  "Message": "An exception occured when invoking the operation - The current user's session is used on another device at 10/23/2026 09:29:30 am on device {22222222-BBBB-4BBB-8BBB-222222222222}. Please sign in again on this device to transfer the session back and resume work on this device. MULTI_DEVICE_USER_LOGIN",
+  "ExceptionType": "ErrorException",
+  "ActivityId": "scrubbed"
+}

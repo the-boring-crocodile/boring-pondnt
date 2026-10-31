@@ -2,8 +2,8 @@
 """Regenerate requirements.lock and requirements-tests.lock, pinned with hashes.
 
 One universal lock (Python 3.10-3.14, all platforms) for everything the release
-ships besides the four packages built from source at release time (boring-pondnt
-and, from boring-services, sourcecache-d365, knowledge and canvas). Pond Common
+ships besides the five packages built from source at release time (boring-pondnt
+and, from boring-services, sourcecache-d365, knowledge, canvas and mcp-ferry). Pond Common
 comes from its released wheels (--common-wheels, until Common is on a package
 index); everything else from the package index. Existing pins and hashes are
 kept unless you pass --upgrade-package NAME or --fresh.
@@ -21,7 +21,7 @@ _, develop = load()
 
 ROOT = Path(__file__).resolve().parents[1]
 LOCAL = (("boring-pondnt", None), ("boring-sourcecache-d365", "sourcecache-d365"),
-         ("boring-knowledge", "knowledge"), ("boring-canvas", "canvas"))
+         ("boring-knowledge", "knowledge"), ("boring-canvas", "canvas"), ("boring-mcp-ferry", "mcp-ferry"))
 TESTS = "pytest==9.1.1\n"
 COMMAND = "python scripts/lock.py --common-wheels <Common dist> --services-root <boring-services>"
 

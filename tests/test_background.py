@@ -25,6 +25,14 @@ def test_the_d365_server_may_start_this_way_too():
     assert "boring_pondnt.d365_server" in background.ALLOWED
 
 
+def test_every_service_setup_runs_as_the_person_may_start_this_way():
+    """setup's tasks for account="user" services start through this launcher; a module
+    missing here exits 1 before any log line (d365whsapp and d365web on rc28)."""
+    from boring_pondnt.setup_services import SERVICES
+    user_modules = {s.module for s in SERVICES.values() if s.account == "user"}
+    assert user_modules == background.ALLOWED
+
+
 @pytest.mark.parametrize("argv", [[], ["--log", "x"], ["--log", "x", "os"], ["x", "y", "boring_pondnt.server"]])
 def test_only_the_core_and_only_with_a_log(argv):
     with pytest.raises(SystemExit):

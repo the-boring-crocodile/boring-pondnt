@@ -155,9 +155,7 @@ def test_job_does_not_publish_exit_while_cleanup_is_pending(tmp_path):
             entered.set()
             assert release.wait(5)
     jobs = d365.Jobs("unused", tmp_path)
-    job = dict(job_id="j", kind="fixture", log=str(tmp_path / "build.log"), started=time.time(),
-               tree=Tree(), state="running", exit_code=None,
-               stop=threading.Event(), done=threading.Event())
+    job = d365.Job("j", "fixture", str(tmp_path / "build.log"), time.time(), tree=Tree())
     jobs._jobs["j"] = job
     watcher = threading.Thread(target=jobs._watch, args=(job,))
     watcher.start()
@@ -178,9 +176,7 @@ def test_failed_job_cleanup_is_never_stopped(tmp_path):
     tree = Mock()
     tree.close.side_effect = OSError("synthetic private detail")
     jobs = d365.Jobs("unused", tmp_path)
-    job = dict(job_id="j", kind="fixture", log=str(tmp_path / "build.log"), started=time.time(),
-               tree=tree, state="running", exit_code=None,
-               stop=threading.Event(), done=threading.Event())
+    job = d365.Job("j", "fixture", str(tmp_path / "build.log"), time.time(), tree=tree)
     jobs._jobs["j"] = job
     jobs._request_stop(job)
     jobs._watch(job)
@@ -232,10 +228,9 @@ def test_stdio_disconnect_runs_shutdown_before_server_exit(fake_ps, tmp_path, mo
             async with ClientSession(reader, writer, read_timeout_seconds=15) as client:
                 await client.initialize()
                 deadline = time.monotonic() + 15
-                while True:
-                    response = await client.call_tool("d365_status", {})
-                    status = json.loads(response.content[0].text)
-                    if status["session"]["state"] == "ready":
+                while True:  # d365_run refuses `locked` until d365fo.tools has loaded
+                    response = await client.call_tool("d365_run", {"command": "Get-D365Model"})
+                    if not response.is_error:
                         break
                     assert time.monotonic() < deadline
                     await asyncio.sleep(0.05)
@@ -275,7 +270,7 @@ def test_job_spawn_racing_shutdown_is_not_lost(fake_ps, tmp_path, monkeypatch): 
         assert not worker.is_alive() and not closer.is_alive()
         assert not failures and len(started) == 1
         assert jobs.status(started[0]["job_id"])["state"] == "stopped"
-        assert jobs._job(started[0]["job_id"])["tree"]._closed
+        assert jobs._get(started[0]["job_id"]).tree._closed
     finally:
         release.set()
         worker.join(10)
@@ -315,8 +310,8 @@ def test_unsettled_sync_preserves_logs_and_refuses_successor(tmp_path, state, do
     event = threading.Event()
     if done:
         event.set()
-    jobs._jobs["old"] = dict(job_id="old", kind="sync", state=state,
-                             done=event, cleanup_confirmed=confirmed)
+    jobs._jobs["old"] = d365.Job("old", "sync", "unused.log", 0, state=state, done=event,
+                                 cleanup_error=None if confirmed else "OSError: cleanup unconfirmed")
     prepare = Mock()
     with pytest.raises(Refused) as error:
         jobs.start("sync", "must not execute", prepare=prepare)

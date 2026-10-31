@@ -68,5 +68,5 @@ def test_d365_tail_cannot_chase_appended_output(tmp_path, monkeypatch):
 
     monkeypatch.setattr(d365, "open", lambda *args: GrowingLog(b"x" * (512 * 1024)), raising=False)
     manager = d365.Jobs("synthetic-powershell", tmp_path)
-    manager._jobs["synthetic"] = {"log": str(tmp_path / "synthetic")}
+    manager._jobs["synthetic"] = d365.Job("synthetic", "fixture", str(tmp_path / "synthetic"), 0)
     assert manager.tail("synthetic", 2) == ["kept", "last"]
