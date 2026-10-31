@@ -1,8 +1,10 @@
 """Release inputs are checked before output, network or build tools are touched."""
 import importlib.util
 from pathlib import Path
+import shutil
 import subprocess
 import sys
+from types import SimpleNamespace
 
 import pytest
 
@@ -22,7 +24,15 @@ def builder(tmp_path, monkeypatch):
     services.mkdir()
     def forbidden(*args, **kwargs):
         pytest.fail("build reached effects before its input checks")
-    monkeypatch.setattr(module, "run", forbidden)
+
+    def plain_copy(source, target):
+        shutil.copytree(source, target, dirs_exist_ok=True, ignore=shutil.ignore_patterns("__pycache__"))
+        return target
+    # boring_deploy.develop comes from real Common wheels; these fake ones stand in for it here
+    develop = SimpleNamespace(plain_copy=plain_copy, run=forbidden, git=forbidden, uv=forbidden,
+                              package=forbidden)
+    monkeypatch.setattr(module, "develop", develop)
+    monkeypatch.setattr(module, "load", forbidden)
     monkeypatch.setattr(module, "fetch", forbidden)
     return module, services, common
 
@@ -66,6 +76,25 @@ def test_packaged_integration_collects_without_source_checkout(builder, tmp_path
     assert result.returncode == 0, result.stdout + result.stderr
     assert "test_runtime_contract" in result.stdout
     assert len(list(source.glob("test_*.py"))) == 2  # packaging never edits its source
+
+
+
+
+def test_packaged_ferry_tests_can_import_their_sibling_fixture(builder, tmp_path):
+    module, _, _ = builder
+    stage = tmp_path / "isolated-bundle"
+    tests = stage / "services-tests" / "mcp-ferry" / "tests"
+    tests.mkdir(parents=True)
+    (tests / "test_ferry.py").write_text("def backend_fixture(): return 'carried'\n")
+    (tests / "test_gateway_arguments.py").write_text(
+        "import test_ferry as fixture\n"
+        "def test_gateway_admission_fixture(): assert fixture.backend_fixture() == 'carried'\n")
+    module.write_services_test_config(stage)
+    result = subprocess.run(
+        [sys.executable, "-I", "-m", "pytest", "-q", "-c", str(stage / "services-tests/pytest.ini")],
+        cwd=stage, capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "1 passed" in result.stdout
 
 
 def test_each_wheel_keeps_its_version_and_the_release_its_own(builder, tmp_path):

@@ -10,6 +10,7 @@
         .\setup.ps1 -WhatIf      look and show the plan only; changes nothing
         .\setup.ps1 -Yes         apply the plan without asking (never touches Defender without -AddDefenderExclusion)
         .\setup.ps1 -Uninstall   remove pondNT's entries from .mcp.json; list what else to remove
+        .\setup.ps1 -Gateway all put the services (not the core, not Knowledge) behind one entry, boring-gateway
 
     What it may change, each only after you agree:
       - %USERPROFILE%\.mcp.json: the entries of the servers below (HTTP with a key), keeps everything else; a backup
@@ -21,6 +22,11 @@
         their entries in .mcp.json (the key is in the entry). -Services picks, -SkipServices skips.
       - the core and the D365 server the same way, except that their tasks run as you, at
         logon, elevated, without a window: Copilot's commands run in them, as you.
+      - optional, -Gateway: boring-gateway (a boring-mcp-ferry, SYSTEM at boot, 127.0.0.1 with a key) in
+        place of the chosen services' own entries: Copilot sees its four tools (service_list,
+        service_describe, service_read, service_call) instead of every service's. 'all' = every chosen
+        service but the core and Knowledge; or a list, e.g. 'd365,canvas'; 'none' takes them back out;
+        'keep' (default) keeps what is behind it now. The services keep their tasks, ports and keys.
       - Defender: when it scans pondNT's python, setup ASKS (default no) whether to exclude this release's
         python.exe and pythonw.exe; -AddDefenderExclusion plans it. -Yes alone never does it. That is
         dangerous -- read INSTALL.md, step 2. -Uninstall offers to remove those exclusions again.
@@ -39,7 +45,8 @@ param(
     [string]$McpJson = (Join-Path $env:USERPROFILE '.mcp.json'),
     [switch]$SkipIndex,
     [string]$Services = 'sourcecache,knowledge,canvas,core,d365',
-    [switch]$SkipServices
+    [switch]$SkipServices,
+    [string]$Gateway = 'keep'           # keep | none | all | services behind boring-gateway, e.g. 'd365,canvas'
 )
 $ErrorActionPreference = 'Stop'
 # Elevated logon tasks, SYSTEM boot tasks and Defender settings need an administrator.
@@ -115,6 +122,8 @@ function Services-Plan($config, [switch]$Apply, [switch]$Remove, [switch]$Finali
     if ($Remove) { $a += '--uninstall' }
     elseif ($Finalize) { $a += '--finalize' }
     elseif (-not $Apply) { $a += '--plan' }
+    # Uninstall and finalize read what is behind the gateway from its ferry.json.
+    if ($Gateway -and -not $Remove -and -not $Finalize) { $a += @('--gateway', $Gateway) }
     $OutputEncoding = New-Object Text.UTF8Encoding $false
     $servers = [ordered]@{}
     foreach ($k in $config['servers'].Keys) { $servers[$k] = $config['servers'][$k] }
@@ -185,27 +194,102 @@ function Checked-ServiceTask($item) {
     }
     return $task
 }
-function Stop-ServiceProcesses($item, [string]$executable) {
+function Service-Processes($item, [string]$executable) {
     if ($item.account -eq 'user') {
-        # Task Scheduler starts "<exe> <arguments>": the exact executable, ending in exactly our arguments.
         $tails = @(' ' + (Service-UserArguments $item))
-        Get-CimInstance Win32_Process -Filter "Name='pythonw.exe'" |
+        return @(Get-CimInstance Win32_Process -Filter "Name='pythonw.exe'" -ErrorAction Stop |
             Where-Object { $line = "$($_.CommandLine)"; $_.ExecutablePath -eq $executable -and
-                @($tails | Where-Object { $line.EndsWith($_, [StringComparison]::Ordinal) }).Count } |
-            ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction Stop }
-        return
+                @($tails | Where-Object { $line.EndsWith($_, [StringComparison]::Ordinal) }).Count })
     }
-    # Exact executable and full command only; never a folder substring.
-    $expected = Service-ProcessCommand $item $executable
-    Get-CimInstance Win32_Process -Filter "Name='python.exe'" |
-        Where-Object { $_.ExecutablePath -eq $executable -and $_.CommandLine -ceq $expected } |
-        ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction Stop }
+    $command = Service-ProcessCommand $item $executable
+    $image = Quote $executable
+    # cmd.exe adds separator whitespace after the image and at the end. Keep every argument exact.
+    $pattern = '^' + [regex]::Escape($image) + '[ \t]+' +
+        [regex]::Escape($command.Substring($image.Length + 1)) + '[ \t]*$'
+    return @(Get-CimInstance Win32_Process -Filter "Name='python.exe'" -ErrorAction Stop |
+        Where-Object { $_.ExecutablePath -eq $executable -and $_.CommandLine -cmatch $pattern })
 }
-function Port-Owner([int]$port) {
-    $listen = Get-NetTCPConnection -LocalAddress 127.0.0.1 -LocalPort $port -State Listen -ErrorAction SilentlyContinue |
-        Select-Object -First 1
-    if (-not $listen) { return $null }
-    return (Get-CimInstance Win32_Process -Filter "ProcessId=$($listen.OwningProcess)").ExecutablePath
+function Stop-CheckedProcess($observed) {
+    $problems = @()
+    $process = Get-Process -Id $observed.ProcessId -ErrorAction SilentlyContinue -ErrorVariable problems
+    if (@($problems | Where-Object { $_.CategoryInfo.Category -ne 'ObjectNotFound' }).Count) {
+        throw "Cannot inspect selected service process $($observed.ProcessId); not stopped."
+    }
+    if (-not $process) { return }
+    try {
+        $null = $process.Handle  # retain this process, not a later reuse of its PID
+        # CIM creation timestamps have microsecond precision; Process exposes 100 ns ticks.
+        if (-not $observed.CreationDate -or $process.Path -ine $observed.ExecutablePath -or
+            [Math]::Abs(($process.StartTime.ToUniversalTime() - $observed.CreationDate.ToUniversalTime()).Ticks) -gt 9) {
+            throw "Selected service process identity changed; not stopped."
+        }
+        $process.Kill()
+        if (-not $process.WaitForExit(10000)) { throw "Selected service process did not exit within 10 seconds." }
+    } finally { $process.Dispose() }
+}
+function Stop-ServiceProcesses($item, [string]$executable) {
+    foreach ($observed in @(Service-Processes $item $executable)) { Stop-CheckedProcess $observed }
+}
+function Service-Ports($item) {
+    $ports = @(([Uri]$item.url).Port)
+    if ($item.module -eq 'boring_canvas.server') {
+        $at = [array]::IndexOf(@($item.arguments), '--port')
+        if ($at -lt 0) { throw 'Canvas web port is absent from the service plan.' }
+        $ports += [int]$item.arguments[$at + 1]
+    }
+    return @($ports | Sort-Object -Unique)
+}
+function Service-Listeners($item) {
+    foreach ($port in @(Service-Ports $item)) {
+        $problems = @()
+        $found = @(Get-NetTCPConnection -LocalAddress 127.0.0.1 -LocalPort $port -State Listen -ErrorAction SilentlyContinue -ErrorVariable problems)
+        if (@($problems | Where-Object { $_.CategoryInfo.Category -ne 'ObjectNotFound' }).Count) {
+            throw "Cannot inspect listener on port $port; no task replacement allowed."
+        }
+        $found
+    }
+}
+function Test-ServiceLogFree($item) {
+    if (-not (Test-Path -LiteralPath $item.log -ErrorAction Stop)) { return $true }
+    try {
+        $handle = [IO.File]::Open($item.log, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::None)
+        $handle.Dispose()
+        return $true
+    } catch [IO.IOException] { return $false }
+}
+function Assert-ServiceHandover($item) {
+    $task = Checked-ServiceTask $item
+    $listeners = @(Service-Listeners $item)
+    if (-not $listeners) { return }
+    $ownedIds = @()
+    if ($task) {
+        $ownedIds = @(Service-Processes $item (Owned-TaskPython $item $task) | ForEach-Object ProcessId)
+    }
+    if (@($listeners | Where-Object { $_.OwningProcess -notin $ownedIds }).Count) {
+        throw "$($item.name): a required port has an unrelated listener; retained. Stop it explicitly before setup."
+    }
+}
+function Wait-ServiceStopped($item, [int]$seconds = 30) {
+    $clock = [Diagnostics.Stopwatch]::StartNew()
+    do {
+        $task = Checked-ServiceTask $item
+        $busy = $task -and "$($task.State)" -in @('Running','Queued','4','2')
+        $listeners = @(Service-Listeners $item)
+        $logFree = Test-ServiceLogFree $item
+        if (-not $busy -and -not $listeners -and $logFree) { return }
+        if ($clock.Elapsed.TotalSeconds -ge $seconds) { break }
+        Start-Sleep -Milliseconds 250
+    } while ($true)
+    throw "$($item.name): old task/process resources did not settle; task=$($task.State), occupied ports=$(@($listeners | ForEach-Object LocalPort) -join ','), log free=$logFree. Setup stopped."
+}
+function Stop-ServiceTask($item) {
+    $task = Checked-ServiceTask $item
+    if ($task) {
+        $oldPython = Owned-TaskPython $item $task
+        Stop-ScheduledTask -TaskPath '\pondNT\' -TaskName $item.task -ErrorAction Stop
+        Stop-ServiceProcesses $item $oldPython
+    }
+    Wait-ServiceStopped $item
 }
 function Register-ServiceTask($item) {
     # SYSTEM: a boot trigger under the user's account with S4U never fired on a
@@ -225,39 +309,111 @@ function Register-ServiceTask($item) {
     $settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 3 `
         -RestartInterval (New-TimeSpan -Minutes 1) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
         -StartWhenAvailable -MultipleInstances IgnoreNew
-    $existing = Checked-ServiceTask $item
-    if ($existing) {
-        $oldPython = Owned-TaskPython $item $existing
-        Stop-ScheduledTask -TaskPath '\pondNT\' -TaskName $item.task -ErrorAction Stop
-        Stop-ServiceProcesses $item $oldPython
-    }
+    Stop-ServiceTask $item
     Register-ScheduledTask -TaskPath '\pondNT\' -TaskName $item.task -Action $action -Trigger $trigger `
         -Principal $principal -Settings $settings -Force | Out-Null
     Start-ScheduledTask -TaskPath '\pondNT\' -TaskName $item.task
 }
-# The kit: served from the state folder; setup seeds it once and never overwrites it.
-function Say-Kit($kit) {
+# The handbook: served from the state folder; setup seeds it once and never overwrites it.
+function Say-Handbook($kit) {
     if (-not $kit) { return }
     switch ($kit.state) {
-        'new' { Say "    The kit -> $($kit.folder) (copied once from this release; later releases never overwrite it)" }
+        'new' { Say "    The handbook -> $($kit.folder) (copied once from this release; later releases never overwrite it)" }
         'kept' {
-            if ($kit.seeded) { Say "    The kit: copied to $($kit.folder)" Green }
+            if ($kit.seeded) { Say "    The handbook: copied to $($kit.folder)" Green }
             elseif (@($kit.differs).Count) {
-                Say "    The kit: $($kit.folder) kept; differs from this release's kit in: $(@($kit.differs) -join ', ')" Yellow
+                Say "    The handbook: $($kit.folder) kept; differs from this release's handbook in: $(@($kit.differs) -join ', ')" Yellow
                 Say "      review and merge deliberately: compare $($kit.release) with it (setup never overwrites it)" Yellow
-            } else { Say "    The kit: $($kit.folder) kept; same as this release's kit" }
+            } else { Say "    The handbook: $($kit.folder) kept; same as this release's handbook" }
         }
-        'no-release-kit' { Say "    The kit: this release has none at $($kit.release)" Yellow }
+        'no-release-kit' { Say "    The handbook: this release has none at $($kit.release)" Yellow }
     }
 }
-function Wait-Port([int]$port, [string]$python, [int]$seconds = 30) {
-    # Answering is not enough: the listener must be this release's python, not a leftover.
-    $until = (Get-Date).AddSeconds($seconds)
-    while ((Get-Date) -lt $until) {
-        if ((Port-Owner $port) -eq $python) { return $true }
-        Start-Sleep -Milliseconds 500
+function Wait-ServiceReady($item, [int]$seconds = 30) {
+    $clock = [Diagnostics.Stopwatch]::StartNew()
+    $ports = @(Service-Ports $item)
+    do {
+        $ownedIds = @(Service-Processes $item $item.python | ForEach-Object ProcessId)
+        $listeners = @(Service-Listeners $item)
+        $missing = @($ports | Where-Object { $_ -notin @($listeners.LocalPort) })
+        $foreign = @($listeners | Where-Object { $_.OwningProcess -notin $ownedIds })
+        $task = Checked-ServiceTask $item
+        $running = $task -and "$($task.State)" -in @('Running','4')
+        if ($running -and -not $missing -and -not $foreign -and $listeners.Count -ge $ports.Count) { return $true }
+        if ($clock.Elapsed.TotalSeconds -ge $seconds) { return $false }
+        Start-Sleep -Milliseconds 250
+    } while ($true)
+}
+function Service-StartFailure($item) {
+    $detail = 'task result unavailable'
+    try {
+        $task = Checked-ServiceTask $item
+        $info = Get-ScheduledTaskInfo -TaskPath '\pondNT\' -TaskName $item.task -ErrorAction Stop
+        $detail = "task=$($task.State), LastTaskResult=$($info.LastTaskResult)"
+    } catch { }
+    return "$($item.name): required listeners were not served by the exact planned process; $detail. See $($item.log). Client publication and key retirement stopped."
+}
+function Assert-McpUnchanged {
+    $current = $null
+    if (Test-Path -LiteralPath $McpJson -ErrorAction Stop) {
+        $current = (Get-FileHash -Algorithm SHA256 -LiteralPath $McpJson).Hash.ToLowerInvariant()
     }
-    return $false
+    if ($current -cne $script:McpReadSha) { throw 'Client configuration changed during setup; inspect before retrying.' }
+}
+function PowerShell-Literal([string]$value) { "'" + $value.Replace("'", "''") + "'" }
+function Save-SetupAttempt {
+    $json = $script:SetupAttempt | ConvertTo-Json -Depth 10
+    $a = @('-B', '-m', 'boring_pondnt.publish_config', '--path', $script:SetupAttemptPath)
+    if ($script:SetupAttemptSha) { $a += @('--expected-sha', $script:SetupAttemptSha) }
+    $OutputEncoding = New-Object Text.UTF8Encoding $false
+    $json | & $python @a
+    if ($LASTEXITCODE) { throw 'Cannot persist setup recovery record; setup stopped.' }
+    $script:SetupAttemptSha = (Get-FileHash -Algorithm SHA256 -LiteralPath $script:SetupAttemptPath).Hash.ToLowerInvariant()
+}
+function Start-SetupAttempt($selected, [string]$operation = 'apply') {
+    $folder = Join-Path $stateRoot 'setup-attempts'
+    $null = New-Item -ItemType Directory -Path $folder -Force
+    $script:SetupAttemptPath = Join-Path $folder ("$([guid]::NewGuid().ToString('N')).json")
+    $script:SetupAttemptSha = $null
+    $only = @($selected.services | Where-Object { $_.module -ne 'boring_mcp_ferry.server' } |
+        ForEach-Object { Split-Path -Leaf $_.folder } | Select-Object -Unique) -join ','
+    $gated = @($selected.services | Where-Object { $_.behind } |
+        ForEach-Object { Split-Path -Leaf $_.folder }) -join ','
+    if (-not $gated) { $gated = 'none' }
+    $retry = '& ' + (PowerShell-Literal (Join-Path $root 'setup.ps1'))
+    if ($operation -eq 'uninstall') { $retry += ' -Uninstall' }
+    else { $retry += ' -SkipIndex -Services ' + (PowerShell-Literal $only) + ' -Gateway ' + (PowerShell-Literal $gated) }
+    if ($Index) { $retry += ' -Index ' + (PowerShell-Literal $Index) }
+    $retry += ' -McpJson ' + (PowerShell-Literal $McpJson)
+    $script:SetupAttempt = [ordered]@{
+        schema = 1; operation = $operation; status = 'in_progress'; phase = 'preparation'
+        release = $root; state = $stateRoot; client = $McpJson; client_sha_before = $script:McpReadSha
+        services = $only; gateway = $gated; index = $Index
+        started_utc = [DateTime]::UtcNow.ToString('o'); current_service = $null
+        started_services = @(); retired_services = @()
+        retry_preview = $retry + ' -WhatIf'; retry_apply = $retry
+    }
+    Save-SetupAttempt
+    Say "  Recovery record: $script:SetupAttemptPath"
+}
+function Set-SetupPhase([string]$phase, [string]$service = '') {
+    $script:SetupAttempt['phase'] = $phase
+    $script:SetupAttempt['current_service'] = $service
+    Save-SetupAttempt
+}
+function Fail-SetupAttempt {
+    if ($script:SetupAttempt) {
+        $script:SetupAttempt['status'] = 'failed'
+        try { Save-SetupAttempt } catch { Say '  Recovery record could not be updated; inspect its last saved phase.' Yellow }
+        Say "  Setup did not complete. Recovery record: $script:SetupAttemptPath" Yellow
+        Say "  Preview the recorded retry: $($script:SetupAttempt.retry_preview)" Yellow
+    }
+}
+function Complete-SetupAttempt {
+    $script:SetupAttempt['status'] = 'completed'
+    $script:SetupAttempt['phase'] = 'completed'
+    $script:SetupAttempt['completed_utc'] = [DateTime]::UtcNow.ToString('o')
+    Save-SetupAttempt
 }
 
 # ---------------------------------------------------------------- uninstall
@@ -280,15 +436,30 @@ if ($Uninstall) {
     }
     if ($svc.removals -or $tasks) {
         Say "`nServices: entries $(@($svc.removals) -join ', '); scheduled tasks $(@($tasks | ForEach-Object { $_.item.task }) -join ', ')"
-        if ($svc.kit) { Say "  The kit stays in $($svc.kit) (yours; remove it by hand if you want it gone)." }
+        if ($svc.handbook) { Say "  The handbook stays in $($svc.handbook) (yours; remove it by hand if you want it gone)." }
         if (Ask "Stop and remove them (their data folders stay)?") {
-            foreach ($t in $tasks) {
-                $null = Checked-ServiceTask $t.item
-                Stop-ScheduledTask -TaskPath '\pondNT\' -TaskName $t.item.task -ErrorAction Stop
-                Stop-ServiceProcesses $t.item $t.python
-                Unregister-ScheduledTask -TaskPath '\pondNT\' -TaskName $t.item.task -Confirm:$false
+            $script:SetupAttempt = $null
+            try {
+                Assert-McpUnchanged
+                Start-SetupAttempt $svc 'uninstall'
+                foreach ($t in $tasks) {
+                    Set-SetupPhase 'remove-task' $t.item.name
+                    Stop-ServiceTask $t.item
+                    Unregister-ScheduledTask -TaskPath '\pondNT\' -TaskName $t.item.task -Confirm:$false -ErrorAction Stop
+                    $script:SetupAttempt['retired_services'] += $t.item.name
+                    Save-SetupAttempt
+                }
+                if ($svc.removals) {
+                    Set-SetupPhase 'publish-client'
+                    Assert-McpUnchanged
+                    foreach ($k in $svc.removals) { $config['servers'].Remove($k) }
+                    Write-McpJson $config
+                }
+                Complete-SetupAttempt
+            } catch {
+                Fail-SetupAttempt
+                throw
             }
-            if ($svc.removals) { foreach ($k in $svc.removals) { $config['servers'].Remove($k) }; Write-McpJson $config }
         }
     }
     # Ask everything first, then list what stays.
@@ -369,14 +540,21 @@ if (-not $SkipServices) {
     $svcPlan = Services-Plan $config
     foreach ($conflict in $svcPlan.conflicts) { Say "  conflict/manual action: $conflict" Yellow }
     foreach ($item in $svcPlan.services) { $null = Checked-ServiceTask $item }
+    foreach ($r in $svcPlan.retire) { $null = Checked-ServiceTask $r }
+    if ($svcPlan.removals) { $plan += ".mcp.json entries removed: $(@($svcPlan.removals) -join ', ') (reached through boring-gateway, or the gateway retired)" }
+    if ($svcPlan.retire) { $plan += "retire: $(@($svcPlan.retire | ForEach-Object { $_.task }) -join ', ') (-Gateway none: nothing behind it)" }
     if ($svcPlan.services) {
         $plan += "services on 127.0.0.1 with access keys: $(@($svcPlan.services | ForEach-Object { $_.name }) -join ', '); started by Task Scheduler \pondNT\ (services: SYSTEM at boot; core: you at logon); data in $stateRoot\services"
         foreach ($s in $svcPlan.services) {
             $what = if ($s.new_key) { 'new key' } else { 'key kept' }
             $runs = if ($s.account -eq 'user') { "runs as $(Current-User) at logon" } else { 'runs as SYSTEM at boot' }
-            Say "    $($s.name) -> $($s.url) ($what, person $($s.subject); $runs)"
+            $via = if ($s.behind) { "; Copilot reaches it through $($s.behind)" } else { '' }
+            Say "    $($s.name) -> $($s.url) ($what, person $($s.subject); $runs$via)"
         }
-        Say-Kit $svcPlan.kit
+        if ($svcPlan.gateway) {
+            Say "    $($svcPlan.gateway.name) carries $(@($svcPlan.gateway.carries) -join ', '): Copilot sees its four tools instead of theirs"
+        }
+        Say-Handbook $svcPlan.handbook
         if ($svcPlan.services | Where-Object { $_.name -eq 'boring-d365' }) {
             Say "  This gives Copilot boring-d365: it can build, sync, restart services and write to AxDB." Yellow
         }
@@ -415,30 +593,62 @@ if ($plan -match 'Defender') {
 if ($plan -match 'build the source index') {
     if (Ask "Build the source index now (10-35 min with the Defender exclusion, depending on the disk, many times longer without it; this window stays busy)?") {
         & (Join-Path $root 'boring-sourcecache-d365.cmd') build --source $Source --db $Index --name $Name --locales $Locales
-        if ($LASTEXITCODE) { Say '  the index build failed; no service configuration was changed' Red }
+        if ($LASTEXITCODE) { throw 'Source index build failed; no service configuration was changed.' }
     }
 }
 $write = $false
 $servicesChanged = $false
-if ($svcPlan -and $svcPlan.services -and (Ask "Set up the services (configs, keys, boot tasks, .mcp.json entries)?")) {
-    foreach ($item in $svcPlan.services) { $null = Checked-ServiceTask $item }
-    $done = Services-Plan $config -Apply
-    $servicesChanged = $true
-    Say-Kit $done.kit
-    foreach ($s in $done.services) {
-        Register-ServiceTask $s
-        $port = ([Uri]$s.url).Port
-        if (Wait-Port $port $s.python) { Say "  $($s.name): running on $($s.url)" Green }
-        else { Say "  $($s.name): not served by this release on port $port yet; see $($s.log)" Yellow }
-        $config['servers'][$s.name] = $s.entry
-        $write = $true
+$script:SetupAttempt = $null
+try {
+    if ($svcPlan -and ($svcPlan.services -or $svcPlan.retire) -and (Ask "Set up the services (configs, keys, boot tasks, .mcp.json entries)?")) {
+        foreach ($item in @($svcPlan.services) + @($svcPlan.retire)) { if ($item) { Assert-ServiceHandover $item } }
+        Assert-McpUnchanged
+        Start-SetupAttempt $svcPlan
+        $done = Services-Plan $config -Apply
+        $wanted = @(@($svcPlan.services) + @($svcPlan.retire) | Where-Object { $_ } | ForEach-Object name | Sort-Object) -join ','
+        $prepared = @(@($done.services) + @($done.retire) | Where-Object { $_ } | ForEach-Object name | Sort-Object) -join ','
+        if ($wanted -cne $prepared) { throw 'Prepared service scope changed; inspect conflicts and recovery record before retrying.' }
+        $servicesChanged = $true
+        Say-Handbook $done.handbook
+        foreach ($r in $done.retire) {
+            Set-SetupPhase 'retire-task' $r.name
+            $task = Checked-ServiceTask $r
+            if ($task) {
+                Stop-ServiceTask $r
+                Unregister-ScheduledTask -TaskPath '\pondNT\' -TaskName $r.task -Confirm:$false -ErrorAction Stop
+                $script:SetupAttempt['retired_services'] += $r.name
+                Save-SetupAttempt
+                Say "  $($r.name): retired" Green
+            }
+        }
+        foreach ($name in $done.removals) { $config['servers'].Remove($name); $write = $true }
+        # The gateway last: it starts with the prepared backend credentials.
+        foreach ($s in $done.services) {
+            Set-SetupPhase 'start-service' $s.name
+            Register-ServiceTask $s
+            if (-not (Wait-ServiceReady $s)) { throw (Service-StartFailure $s) }
+            $script:SetupAttempt['started_services'] += $s.name
+            Save-SetupAttempt
+            Say "  $($s.name): running on $($s.url)" Green
+            if ($s.entry -and $s.entry_changes) { $config['servers'][$s.name] = $s.entry; $write = $true }
+        }
+        Say "  Access keys stay private in .mcp.json or Ferry's headers files; each bearer acts with its service role."
     }
-    Say "  The access keys are in .mcp.json (headers). The services listen on 127.0.0.1 only, but a key is a"
-    Say "  bearer secret: whoever holds it and can reach the port acts with its role. Keep .mcp.json private."
+    if ($write) {
+        Set-SetupPhase 'publish-client'
+        Assert-McpUnchanged
+        Write-McpJson $config
+    }
+    if ($servicesChanged) {
+        Assert-McpUnchanged
+        Set-SetupPhase 'finalize-keys-and-routing'
+        $null = Services-Plan $config -Finalize
+        Complete-SetupAttempt
+    }
+    if ($write) { Say "  Restart Visual Studio (or reload MCP servers) to pick them up." Green }
+    elseif ($servicesChanged) { Say "  .mcp.json unchanged; no backup or write needed." Green }
+    Say "Done. Undo everything: .\setup.ps1 -Uninstall" Cyan
+} catch {
+    Fail-SetupAttempt
+    throw
 }
-if ($write) {
-    Write-McpJson $config
-    if ($servicesChanged) { $null = Services-Plan (Read-McpJson) -Apply -Finalize }
-    Say "  Restart Visual Studio (or reload MCP servers) to pick them up." Green
-}
-Say "`nDone. Undo everything: .\setup.ps1 -Uninstall" Cyan

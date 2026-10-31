@@ -18,22 +18,24 @@ attrs==26.1.0 \
     # via
     #   jsonschema
     #   referencing
-boring-file-core==0.7.6 \
-    --hash=sha256:0355a2f4a9cc7886c897896e9d19c970e651c66e9cf90dc958cdb11ea3f7e634
+boring-file-core==0.7.11 \
+    --hash=sha256:6b0bdc831b783915860e78cf02f747ff155afaed85afba0ff07fd1605f95addb
     # via boring-pondnt
-boring-registry==0.7.6 \
-    --hash=sha256:6da09430b52e59691cb353f1e85b70cc092faf776a39e79e365faebf0178ddb0
+boring-registry==0.7.11 \
+    --hash=sha256:9172df0feffe48215470ab5cc48e3ee9ff6ca36cf53a9532c2e30e4bb5d472fe
     # via
     #   boring-canvas
     #   boring-knowledge
+    #   boring-mcp-ferry
     #   boring-pondnt
     #   boring-service-kit
     #   boring-sourcecache-d365
-boring-service-kit==0.7.6 \
-    --hash=sha256:3c65072266e55919413bce86da54342349a81f7a48fcf2b0fccb5f8a1ec34b55
+boring-service-kit==0.7.11 \
+    --hash=sha256:592f44c3cb90000db6b944c378b4e5335dde6851bfaba32f730dfbf0ee73c1a2
     # via
     #   boring-canvas
     #   boring-knowledge
+    #   boring-mcp-ferry
     #   boring-pondnt
     #   boring-sourcecache-d365
 cffi==2.1.1 ; platform_python_implementation != 'PyPy' \
@@ -206,7 +208,9 @@ cryptography==50.0.2 \
 exceptiongroup==1.3.1 ; python_full_version < '3.11' \
     --hash=sha256:8b412432c6055b0b7d14c310000ae93352ed6754f70fa8f7c34141f91c4e3219 \
     --hash=sha256:a7a39a3bd276781e98394987d3a5701d0c4edffb633bb7a5144577f82c773598
-    # via anyio
+    # via
+    #   anyio
+    #   boring-mcp-ferry
 h11==0.16.0 \
     --hash=sha256:4e35b956cf45792e4caa5885e69fba00bdbc6ffafbfa020300e549b208ee5ff1 \
     --hash=sha256:63cf8bbe7522de3bf65932fda1d9c2772064ffb3dae62d55932da54b31cb6c86
@@ -221,6 +225,7 @@ httpx2==2.13.1 \
     --hash=sha256:6dff50fabc270ee5fd25d845d0b078ed20564579744d6d962850975996d2f9a4 \
     --hash=sha256:e48744a19e3af5ee48313d0ce5fe941d5422fae5705ea922a4aabf94d7800dfa
     # via
+    #   boring-mcp-ferry
     #   boring-service-kit
     #   mcp
 httpx2-jsfetch==1.0 ; python_full_version >= '3.12' and sys_platform == 'emscripten' \
@@ -247,6 +252,7 @@ mcp==2.2.0 \
     # via
     #   boring-canvas
     #   boring-knowledge
+    #   boring-mcp-ferry
     #   boring-pondnt
     #   boring-service-kit
     #   boring-sourcecache-d365
@@ -823,3 +829,4 @@ uvicorn==0.54.0 \
 # boring-sourcecache-d365
 # boring-knowledge
 # boring-canvas
+# boring-mcp-ferry

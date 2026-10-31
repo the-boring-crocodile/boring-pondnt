@@ -14,7 +14,7 @@ Layout of `boring-pondnt-<version>-win-x64/`:
     setup.ps1          looks, shows the plan, sets up .mcp.json and the index on "yes" (tools/setup.ps1)
     devbox-defender.ps1  Defender exclusions for the D365 box: report, -Apply, -Undo (tools/devbox-defender.ps1)
     extras/pond-tunnel/  optional: the Pond tunnel we test with (docs/DEVBOX_TUNNEL.md, tools/)
-    kit/               the working agreement (`bootstrap` serves it)
+    handbook/          the working agreement (`bootstrap` serves it)
     boring-pondnt-core.cmd    launcher: boring-pondnt-core.cmd [--self-check] ...
     boring-sourcecache-d365.cmd, boring-knowledge.cmd, boring-canvas-server.cmd  the bundled services
     boring-pondnt-d365.cmd    launcher: boring-pondnt-d365.cmd serve ... (D365 operations plus read-only xref)
@@ -38,12 +38,19 @@ import os
 import json
 import shutil
 import re
-import subprocess
 import sys
 import tempfile
 import urllib.request
 import zipfile
 from pathlib import Path
+from typing import Any
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _develop import load  # noqa: E402
+
+# boring_deploy.develop, the steps every component shares; loaded from the Common
+# wheels given to build() (after their check), so importing this script has no effect.
+develop: Any = None
 
 PYTHON_VERSION = "3.14.8"
 PWSH_VERSION = "7.6.6"
@@ -96,44 +103,21 @@ def fetch(url: str, expected_sha256: str) -> Path:
     return target
 
 
-def run(*command: str, cwd: Path | None = None) -> str:
-    return subprocess.run(command, cwd=cwd, check=True, capture_output=True, text=True).stdout
-
-
-def uv() -> str:
-    found = os.environ.get("UV") or shutil.which("uv") or str(Path(sys.executable).parent / "uv")
-    if not Path(found).exists():
-        raise SystemExit("uv is required (pip install uv)")
-    return found
-
-
 def package_version() -> str:
     text = (REPO / "src" / "boring_pondnt" / "__init__.py").read_text()
     return text.split('__version__ = "', 1)[1].split('"', 1)[0]
 
 
-def plain_copy(src: Path, dst: Path) -> None:
-    """Copy a tree without permission bits.
-
-    shutil.copytree copies directory modes, including the setgid bit of the
-    group-shared work tree, and setting that bit is refused here ("Operation
-    not permitted") -- the same cause as git's `core.sharedRepository`
-    failure there.
-    """
-    for path in sorted(src.rglob("*")):
-        if "__pycache__" in path.parts or any(part.endswith(".egg-info") for part in path.parts):
-            continue
-        target = dst / path.relative_to(src)
-        if path.is_dir():
-            target.mkdir(parents=True, exist_ok=True)
-        else:
-            target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(path, target)
+def write_services_test_config(stage: Path) -> None:
+    # Embedded Python ignores PYTHONPATH; packaged sibling fixtures belong on pytest's path.
+    (stage / "services-tests/pytest.ini").write_text(
+        "[pytest]\ntestpaths = .\npythonpath = . kit/tests sourcecache-d365/tests canvas/tests mcp-ferry/tests\n"
+        "addopts = --import-mode=importlib\n")
 
 
 def copy_service_integration_tests(services_root: Path, target: Path) -> None:
     """Ship runtime integration tests; source-build/operator tests stay with source."""
-    plain_copy(services_root / "tests", target)
+    develop.plain_copy(services_root / "tests", target)
     (target / "test_build_preflight.py").unlink(missing_ok=True)  # tests the source build
     # The Linux Docker installer's tests test boring-deploy on Linux, not the services this
     # bundle runs: every test that imports boring_deploy stays with the source (by its
@@ -153,7 +137,7 @@ def enable_site_packages(python_dir: Path) -> None:
 
 
 COMMON = ("boring_registry", "boring_service_kit", "boring_file_core")
-LOCAL_PACKAGES = ("boring-pondnt", "boring-sourcecache-d365", "boring-knowledge", "boring-canvas")
+LOCAL_PACKAGES = ("boring-pondnt", "boring-sourcecache-d365", "boring-knowledge", "boring-canvas", "boring-mcp-ferry")
 
 
 def common_preflight(common_wheels: Path, common_source: Path | None, with_tests: bool) -> dict:
@@ -202,10 +186,12 @@ def check_release_version(app_version: str, release_name: str, wheels: list[Path
 
 def build(with_tests: bool, out: Path, services_root: Path, common_wheels: Path,
           common_source: Path | None = None) -> Path:
+    global develop
     common = common_preflight(common_wheels, common_source, with_tests)
+    _, develop = load(common_wheels)
     app_version = package_version()  # pondNT's; each wheel keeps its own (local_pins)
-    commit = run("git", "rev-parse", "--short", "HEAD", cwd=REPO).strip()
-    dirty = bool(run("git", "status", "--porcelain", cwd=REPO).strip())
+    commit = develop.git(REPO, "rev-parse", "--short", "HEAD").strip()
+    dirty = bool(develop.git(REPO, "status", "--porcelain").strip())
     release_name = f"boring-pondnt-{app_version}-win-x64" + ("-tests" if with_tests else "")
     stage = out / release_name
     if stage.exists() or (out / f"{release_name}.zip").exists():
@@ -220,30 +206,25 @@ def build(with_tests: bool, out: Path, services_root: Path, common_wheels: Path,
         archive.extractall(stage / "pwsh")
 
     wheel_dir = stage / "wheels"  # owned by this new release; never sweep a shared output path
-    # Build from a copy: setuptools renames folders inside build/, which the
-    # group-shared work tree refuses ("Operation not permitted"), and the copy
-    # keeps build clutter out of the repository.
-    # Services are independent packages supplied explicitly at build time.
+    # Each wheel is built from a copy of its tracked package files (develop.package), as the
+    # check and the lock do: nothing is built inside the trees.
     # uv with --only-binary installs wheels only, never builds from source.
     with tempfile.TemporaryDirectory(prefix="boring-pondnt-build-") as scratch:
         for name in common["common_wheels"]:
             wheel_dir.mkdir(exist_ok=True)
             shutil.copyfile(common_wheels / name, wheel_dir / name)
-        for package, root in (("boring-pondnt", REPO),
-                              ("boring-sourcecache-d365", services_root / "sourcecache-d365"),
-                              ("boring-knowledge", services_root / "knowledge"),
-                              ("boring-canvas", services_root / "canvas")):
-            source = Path(scratch) / package
-            source.mkdir()
-            for item in ("pyproject.toml", "README.md"):
-                if (root / item).exists():
-                    shutil.copyfile(root / item, source / item)
-            plain_copy(root / "src", source / "src")
-            run(uv(), "build", "--build-constraint", str(services_root / "scripts/build-constraints.txt"), "--wheel", "--out-dir", str(wheel_dir), str(source))
+        for package, root, sub in (("boring-pondnt", REPO, "."),
+                                   ("boring-sourcecache-d365", services_root, "sourcecache-d365"),
+                                   ("boring-knowledge", services_root, "knowledge"),
+                                   ("boring-canvas", services_root, "canvas"),
+                                   ("boring-mcp-ferry", services_root, "mcp-ferry")):  # the optional gateway (D41)
+            source = develop.package(root, Path(scratch) / package, sub)
+            develop.run(develop.uv(), "build", "--build-constraint", services_root / "scripts/build-constraints.txt",
+                        "--wheel", "--out-dir", wheel_dir, source)
     (wheel,) = wheel_dir.glob("boring_pondnt-*.whl")
     (registry,) = wheel_dir.glob("boring_registry-*.whl")
     (kit,) = wheel_dir.glob("boring_service_kit-*.whl")
-    # The committed locks (scripts/lock.py) pin everything but the four packages
+    # The committed locks (scripts/lock.py) pin everything but the five packages
     # built above; those join with the hashes of the wheels just built. uv
     # evaluates the universal lock's markers for the Windows target.
     lock = stage / "requirements.txt"
@@ -252,8 +233,8 @@ def build(with_tests: bool, out: Path, services_root: Path, common_wheels: Path,
         text += (REPO / "requirements-tests.lock").read_text()
     text += local_pins(list(wheel_dir.glob("*.whl")))
     lock.write_text(text)
-    run(uv(), "pip", "install", "--quiet", "--target", str(stage / "python" / "Lib" / "site-packages"),
-        *TARGET, "--require-hashes", "--no-deps", "--find-links", str(wheel_dir), "-r", str(lock))
+    develop.run(develop.uv(), "pip", "install", "--quiet", "--target", stage / "python" / "Lib" / "site-packages",
+                *TARGET, "--require-hashes", "--no-deps", "--find-links", wheel_dir, "-r", lock)
     # pywin32 brings two programs pondNT never runs: Pythonwin (an MFC editor)
     # and the Windows-service host. The service kit uses win32api and win32job
     # only. Unused executables in a downloaded zip only draw antivirus attention.
@@ -261,7 +242,8 @@ def build(with_tests: bool, out: Path, services_root: Path, common_wheels: Path,
     shutil.rmtree(site_packages / "pythonwin")
     (site_packages / "win32" / "pythonservice.exe").unlink()
 
-    plain_copy(REPO / "kit", stage / "kit")
+    develop.plain_copy(REPO / "handbook", stage / "handbook")
+    develop.plain_copy(REPO / "docs", stage / "docs")  # installed guides referenced by the handbook
     # Optional, not the default: the Pond tunnel we test with, shipped, not installed.
     extras = stage / "extras" / "pond-tunnel"
     extras.mkdir(parents=True)
@@ -274,7 +256,7 @@ def build(with_tests: bool, out: Path, services_root: Path, common_wheels: Path,
                                      .replace(b"\n", b"\r\n"))
     (stage / "INSTALL.md").write_bytes((REPO / "docs" / "INSTALL.md").read_bytes().replace(b"\r\n", b"\n")
                                        .replace(b"\n", b"\r\n"))  # Notepad-friendly
-    plain_copy(services_root / "examples", stage / "examples")
+    develop.plain_copy(services_root / "examples", stage / "examples")
     for name in ("LICENSE", "COPYING.md"):  # the bundle carries our licence
         shutil.copyfile(REPO / name, stage / name)
     shutil.copyfile(services_root / "docs/CONFIGURATION.md", stage / "SERVICES_CONFIGURATION.md")
@@ -287,29 +269,26 @@ def build(with_tests: bool, out: Path, services_root: Path, common_wheels: Path,
     for name, module in (("boring-sourcecache-d365", "boring_sourcecache_d365.server"),
                          ("boring-knowledge", "boring_knowledge.server"),
                          ("boring-canvas-server", "boring_canvas.server"),
+                         ("boring-mcp-ferry", "boring_mcp_ferry.server"),
                          ("boring-service-keys", "boring_service_kit.keys")):
         (stage / f"{name}.cmd").write_text(
             '@echo off\r\nset PYTHONUTF8=1\r\n"%~dp0python\\python.exe" -m ' + module + ' %*\r\n')
     if with_tests:
-        plain_copy(REPO / "tests", stage / "tests")
+        develop.plain_copy(REPO / "tests", stage / "tests")
         # Builder parity is a source-tree gate, already run on Linux. The
         # runtime bundle deliberately has neither builder nor package sources.
         for source_only in ("test_build_preflight.py", "test_tunnel_host.py"):
             (stage / "tests" / source_only).unlink()
-        for name in ("knowledge", "canvas", "sourcecache-d365"):
+        for name in ("knowledge", "canvas", "sourcecache-d365", "mcp-ferry"):
             fixture = stage / "services-tests" / name
-            plain_copy(services_root / name / "tests", fixture / "tests")
+            develop.plain_copy(services_root / name / "tests", fixture / "tests")
             shutil.copyfile(services_root / name / "pyproject.toml", fixture / "pyproject.toml")
         for drawing in ("rose.svg", "ausmalbilder.svg"):
             shutil.copyfile(services_root / "canvas" / drawing, stage / "services-tests/canvas" / drawing)
-        plain_copy(common_source / "packages/boring-service-kit", stage / "services-tests" / "kit")
-        plain_copy(services_root / "examples", stage / "services-tests" / "examples")  # knowledge's examples test
+        develop.plain_copy(common_source / "packages/boring-service-kit", stage / "services-tests" / "kit")
+        develop.plain_copy(services_root / "examples", stage / "services-tests" / "examples")  # knowledge's examples test
         copy_service_integration_tests(services_root, stage / "services-tests" / "integration")
-        # Paths belong to pytest configuration: embedded Python ignores PYTHONPATH.
-        # The kit source tree is a vendoring fixture, never an import source.
-        (stage / "services-tests/pytest.ini").write_text(
-            "[pytest]\ntestpaths = .\npythonpath = . kit/tests sourcecache-d365/tests canvas/tests\n"
-            "addopts = --import-mode=importlib\n")
+        write_services_test_config(stage)
         (stage / "run-services-tests.cmd").write_text(
             '@echo off\r\ncd /d "%~dp0"\r\nset PYTHONUTF8=1\r\n'
             '"%~dp0python\\python.exe" -m pytest -q -c services-tests/pytest.ini services-tests %*\r\n')
@@ -329,9 +308,9 @@ def build(with_tests: bool, out: Path, services_root: Path, common_wheels: Path,
         "pwsh": {"version": PWSH_VERSION, "url": PWSH_URL, "sha256": sha256(pwsh_zip)},
         "packages": [d[: -len(".dist-info")] for d in installed],
         "with_tests": with_tests,
-        "services_commit": run("git", "rev-parse", "HEAD", cwd=services_root).strip(),
-        "services_dirty": bool(run("git", "status", "--porcelain", cwd=services_root).strip()),
-        "uv": run(uv(), "--version").strip(),
+        "services_commit": develop.git(services_root, "rev-parse", "HEAD").strip(),
+        "services_dirty": bool(develop.git(services_root, "status", "--porcelain").strip()),
+        "uv": develop.run(develop.uv(), "--version", capture_output=True, text=True).stdout.strip(),
         "build_constraints_sha256": sha256(services_root / "scripts/build-constraints.txt"),
         "requirements_sha256": sha256(lock),
         "wheel_sha256": {p.name: sha256(p) for p in sorted(wheel_dir.glob("*.whl"))},

@@ -13,8 +13,9 @@ from boring_service_kit.tools import READ_ONLY, RUNS, WRITES
 from boring_service_kit.outcomes import Failed, Outcome, Refused
 
 INSTRUCTIONS = (
-    "Build, sync, best practice and environment control for this D365 dev box, on d365fo.tools. "
-    "Source text and labels: boring-sourcecache-d365. Compiled references: xref_* here. Long operations run as jobs (d365_job)."
+    "Build, sync and best practice for this D365 dev box, with d365fo.tools loaded in one PowerShell session: "
+    "d365_run runs any d365fo.tools command there (status: Get-D365Environment; models: Get-D365Model). "
+    "Source text and labels: boring-sourcecache-d365. Compiled references: xref. Long operations run as jobs (d365_job)."
 )
 COMPILER_ROWS_DEFAULT, COMPILER_ROWS_MAX = 50, 500
 DRY_RUN_CHARS = 4000
@@ -23,9 +24,9 @@ RESULT_FILES = {"compile": "Dynamics.AX.*.xppc.xml", "best_practice": "Dynamics.
 KINDS = (*RESULT_FILES, "sync")
 SYNC_STEPS_MAX = 60
 SYNC_LOGS = ("SyncEngine.exe_ErrOutput.log", "SyncEngine.exe_StdOutput.log")
-SERVICES = ("all", "aos", "batch", "financialreporter", "dmf", "documentrouting")
-SERVICE_SWITCH = {"aos": "-Aos", "batch": "-Batch", "financialreporter": "-FinancialReporter", "dmf": "-DMF",
-                  "documentrouting": "-DocumentRouting"}
+RUN_COMMAND_CHARS = 20_000
+RUN_OUTPUT_DEFAULT, RUN_OUTPUT_MAX = 20_000, 200_000
+RUN_TIMEOUT_DEFAULT, RUN_TIMEOUT_MAX = 60, 600
 
 _SECRET_NAME = r"[a-z0-9_]*(?:password|pwd|secret|accountkey|sharedaccesskey|sig|token)"
 _SECRET_KEY = re.compile(r"(?i)^" + _SECRET_NAME + r"$")
@@ -187,26 +188,6 @@ def sync_results(folder: Path, warnings: bool, limit: int) -> dict[str, Any]:
             "truncated": len(rows) > limit}
 
 
-SERVICES_NOW = ("@(Get-D365Environment -All | ForEach-Object { [ordered]@{ name = $_.Name; "
-                "status = \"$($_.Status)\" } })")
-
-STATUS = r"""
-$services = @(Get-D365Environment -All | ForEach-Object {
-    [ordered]@{ name = $_.Name; status = "$($_.Status)"; start = "$($_.StartType)" } })
-$installed = @(Get-D365InstalledService | ForEach-Object { [ordered]@{ service = $_.ServiceName; version = "$($_.Version)" } })
-$url = $null; try { $url = (Get-D365Url).Url } catch { }
-$identity = [Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
-[ordered]@{
-    services = $services
-    installed = $installed
-    url = $url
-    elevated = $identity.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-    aos = "$((Get-Service w3svc -ErrorAction SilentlyContinue).Status)"
-    packages = (Split-Path (Get-D365InstalledPackage | Select-Object -First 1).PackageDirectory)
-}
-"""
-
-
 def register_tools(tool: Callable[..., Any], session: Session, jobs: Jobs,
                    state: Path, sql_connect: Callable[..., Any], call_budget: float | None = None) -> None:
     """`call_budget` (behind a Pond, ServiceConfig.call_limit): no call may outlast it."""
@@ -214,6 +195,7 @@ def register_tools(tool: Callable[..., Any], session: Session, jobs: Jobs,
         return min(seconds, call_budget) if call_budget else seconds
 
     wait_max = bounded(WAIT_SECONDS_MAX)
+    run_max = int(bounded(RUN_TIMEOUT_MAX))
     sql_max = int(bounded(sqlserver.TIMEOUT_MAX))
 
     def dry(script: str) -> dict[str, Any]:
@@ -232,46 +214,6 @@ def register_tools(tool: Callable[..., Any], session: Session, jobs: Jobs,
             return dry(script)
         session.ensure_ready()
         return jobs.start(kind, script)
-
-    @tool(READ_ONLY, "reader")
-    def d365_status() -> dict[str, Any]:
-        """This environment: services and their state, URL, installed versions, elevation, d365fo.tools."""
-        # Answer at once, also while d365fo.tools is still loading (tens of seconds on a
-        # cold box): a client may give up on a slow call and show its model nothing
-        # (Visual Studio does); the note tells the model to ask again.
-        result: dict[str, Any] = {"session": session.state}
-        if session.state.get("state") == "loading":
-            result["note"] = ("the D365 PowerShell session is still loading d365fo.tools; "
-                              "call d365_status again in a minute")
-            return result
-        if session.state.get("state") != "ready":
-            return result
-        result.update(session.call(STATUS))
-        if result.get("aos") != "Running":
-            result["note"] = ("IIS (w3svc) is not reported running. This does not establish web-client "
-                              "availability: Visual Studio may host IIS Express. Confirm the hosting "
-                              "owner and application state before requesting any service change.")
-        return result
-
-    @tool(READ_ONLY, "reader")
-    def d365_models(name: str | None = None, exclude_microsoft: bool = False,
-                    customizable_only: bool = False) -> dict[str, Any]:
-        """Models on this box, live: name, module, layer. name: wildcard pattern."""
-        args = []
-        if name:
-            if not re.fullmatch(r"[A-Za-z0-9_.*\-]{1,128}", name):
-                raise Refused("invalid_request", "name is a model name or a pattern with *", name=name)
-            args.append(f"-Name {ps_quote(name)}")
-        if exclude_microsoft:
-            args.append("-ExcludeMicrosoftModels")
-        if customizable_only:
-            args.append("-CustomizableOnly")
-        rows = _as_list(session.call(
-            "@(Get-D365Model " + " ".join(args) + " | ForEach-Object { [ordered]@{ "
-            "name = $_.ModelName; module = $_.Module; layer = $_.Layer; publisher = $_.Publisher; "
-            "version = \"$($_.VersionMajor).$($_.VersionMinor).$($_.VersionBuild).$($_.VersionRevision)\"; "
-            "customizable = \"$($_.Customization)\"; binary = $_.IsBinary } })"))
-        return {"total": len(rows), "models": rows}
 
     @tool(RUNS, "writer")
     def d365_build(module: str, include_reports: bool = False, dry_run: bool = False) -> dict[str, Any]:
@@ -374,33 +316,30 @@ def register_tools(tool: Callable[..., Any], session: Session, jobs: Jobs,
                   f"-LogPath {ps_quote(str(logs))}")
         return act("best_practice", script, dry_run)
 
-    @tool(WRITES, "writer")
-    def d365_environment(action: str, services: str = "all") -> dict[str, Any]:
-        """start | stop | restart services (all, aos, batch, financialreporter, dmf, documentrouting)."""
-        verb = {"start": "Start", "stop": "Stop", "restart": "Restart"}.get(action)
-        if verb is None:
-            raise Refused("invalid_request", "action is start, stop or restart", action=action)
-        chosen = [s.strip().lower() for s in services.split(",") if s.strip()]
-        if not chosen or any(s not in SERVICES for s in chosen) or ("all" in chosen and len(chosen) > 1):
-            raise Refused("invalid_request", f"services: all, or a list of {', '.join(SERVICES[1:])}")
-        switches = "-All" if chosen == ["all"] else " ".join(SERVICE_SWITCH[s] for s in chosen)
-        if call_budget:
-            # Starting or stopping D365 services takes minutes; behind a Pond one call answers
-            # within call_budget, and a cut-off call would leave the services half done.
-            raise Refused("invalid_request", f"{action} takes minutes; one call here answers within "
-                          f"{call_budget:g} s. Run it as a job instead (the core's job_start with "
-                          f"\"{verb}-D365Environment {switches}\" in powershell), then check d365_status")
-        try:
-            session.call(f"$null = {verb}-D365Environment {switches}", timeout=600)
-        except Failed as failure:
-            # Windows can refuse a step (a service already starting) and still end where asked:
-            # say where things are now, so the caller does not retry blindly.
-            try:
-                failure.details = {**failure.details, "now": _as_list(session.call(SERVICES_NOW))}
-            except Outcome:
-                pass
-            raise
-        return {"action": action, "services": chosen, "now": _as_list(session.call(SERVICES_NOW))}
+    @tool(RUNS, "writer")
+    def d365_run(command: str, timeout: int = min(RUN_TIMEOUT_DEFAULT, run_max), background: bool = False,
+                 max_chars: int = RUN_OUTPUT_DEFAULT) -> dict[str, Any]:
+        """Run d365fo.tools; timeout bounds foreground only (default up to 60 s); background returns a job. Credentials masked."""
+        # d365fo.tools: https://github.com/d365collaborative/d365fo.tools/wiki. Labelled credentials
+        # (password=, pwd, secret, sig, ...) are masked before the output is cut; unlabelled text cannot be.
+        if not command.strip() or len(command) > RUN_COMMAND_CHARS:
+            raise Refused("invalid_request", f"command: d365fo.tools commands or a short script, up to "
+                          f"{RUN_COMMAND_CHARS} characters")
+        if not background and not 1 <= timeout <= run_max:
+            raise Refused("invalid_request", f"timeout must be 1-{run_max} seconds here; longer: background=true")
+        if not 1 <= max_chars <= RUN_OUTPUT_MAX:
+            raise Refused("invalid_request", f"max_chars must be 1-{RUN_OUTPUT_MAX}")
+        if background:
+            session.ensure_ready()
+            return jobs.start("run", command)
+        value, host = session.call(f"& {{\n{command}\n}} | Out-String -Width 220", timeout=timeout,
+                                   with_host=True)
+        lines = [str(line) for line in host + _as_list(value) if str(line).strip()]
+        text = redact("\n".join(lines).strip())  # before cutting: a cut must never split a password
+        result: dict[str, Any] = {"output": text[:max_chars], "chars": len(text)}
+        if len(text) > max_chars:
+            result["truncated"] = True
+        return result
 
     @tool(WRITES, "writer")
     def d365_job(job_id: str | None = None, tail_lines: int = TAIL_LINES_DEFAULT, stop: bool = False,

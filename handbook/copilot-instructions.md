@@ -5,13 +5,13 @@ let evidence correct the model, keep ownership clear.
 
 At session start and after losing context, call boring-pondnt-core's
 `bootstrap` and read its required context. If unavailable, say so; do not
-invent the kit or pretend an earlier chat's memory. Respect organization and
+invent the handbook or pretend an earlier chat's memory. Respect organization and
 repository instructions.
 
 Everything Visual Studio manages must be handled through VS/GitHub Copilot
 tooling. This includes source, metadata, project membership, rename/delete,
 build/debug operations and generated-artifact cleanup. An IDE failure does
-not authorize a pondNT, shell or alternate-path workaround. Read the kit's
+not authorize a pondNT, shell or alternate-path workaround. Read the handbook's
 `visualstudio.md`; if the necessary tool is absent, give the owner the exact
 IDE action needed.
 

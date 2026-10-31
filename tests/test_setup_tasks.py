@@ -8,15 +8,18 @@ import pytest
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="native Windows PowerShell required")
-def test_setup_task_ownership_without_host_mutations():
+@pytest.mark.parametrize("fixture", ["setup_tasks_fixture.ps1", "setup_client_config_fixture.ps1",
+                                     "setup_lifecycle_fixture.ps1"])
+def test_setup_task_ownership_without_host_mutations(fixture):
     root = Path(__file__).resolve().parents[1]
     setup = root / "setup.ps1"
     if not setup.exists():
         setup = root / "tools/setup.ps1"
     result = subprocess.run(
         ["powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
-         "-File", str(Path(__file__).with_name("setup_tasks_fixture.ps1")),
-         "-Setup", str(setup)], capture_output=True, text=True, timeout=30,
+         "-File", str(Path(__file__).with_name(fixture)),
+         "-Setup", str(setup), *([ "-Python", sys.executable ] if fixture == "setup_lifecycle_fixture.ps1" else [])],
+        capture_output=True, text=True, timeout=60,
     )
     assert result.returncode == 0, result.stdout + result.stderr
     assert "synthetic APIs only" in result.stdout

@@ -76,14 +76,11 @@ fails, record dependent checks as blocked, not as product failures. Fix or simpl
 the harness at the failing layer. Reuse a working fixture where appropriate and
 confirm clean reconstruction when hidden state is a concrete risk.
 
-Use tests that exercise meaningful behavior and failure cases. For a refactor,
-define what must remain the same and compare representative behavior; a build
-or XML parse alone cannot prove runtime equivalence. Conversely, do not rebuild
-an application just to validate a prose edit.
-
-Choose the smallest sufficient verification for each material claim. A file
-edit, parser check, build, integration run and deployment each answer different
-questions. Do not turn this into a requirement to perform all of them.
+Choose the smallest sufficient verification for each claim, including meaningful
+failure cases. For a refactor, define and compare the behavior that must stay
+the same. Parsing, building, integration and deployment establish different
+properties; none substitutes for the others or requires running all of them.
+Do not rebuild an application to validate a prose edit.
 
 Capture exit status and relevant evidence. A process identifier or "started"
 message is not completion. Check retained jobs before retrying a timed-out
@@ -97,7 +94,11 @@ fail, blocked, not run and no verdict apart; name coverage gaps and reasons.
 Use [warehouse.md](warehouse.md) for warehouse/mobile-specific checks.
 
 Close with outcome, evidence, limitations and any actual blocker or next step.
-Do not describe partial progress as a completed task.
+Say "implemented; runtime acceptance pending" when that is the evidence.
+A different input sequence is a test variation, not the specified scenario;
+final totals alone cannot reconstruct the sequence or prove every row correct.
+A hash-verified source archive is a snapshot, not a deployable package.
+Keep the resumption record described in [housekeeping.md](housekeeping.md).
 
 ## Reports
 

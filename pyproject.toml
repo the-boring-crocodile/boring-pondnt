@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "boring-pondnt"
-version = "0.2.0rc23"
+version = "0.2.8"
 license = "AGPL-3.0-or-later"
 license-files = ["LICENSE", "COPYING.md"]
 description = "Local stdio MCP server for Copilot in Visual Studio on a rebuildable Windows dev VM"
@@ -13,9 +13,9 @@ requires-python = ">=3.10"
 dependencies = [
     "mcp>=2.2,<2.3",
     "boring-sourcecache-d365>=0.1.15,<0.2",
-    "boring-registry>=0.7.6,<0.8",
-    "boring-service-kit[process]>=0.7.6,<0.8",
-    "boring-file-core>=0.7.6,<0.8",
+    "boring-registry>=0.7.10,<0.8",
+    "boring-service-kit[process]>=0.7.10,<0.8",
+    "boring-file-core>=0.7.10,<0.8",
     "pyodbc>=5.3,<6; sys_platform == 'win32'",
 ]
 
@@ -25,6 +25,8 @@ test = ["pytest"]
 [project.scripts]
 boring-pondnt-core = "boring_pondnt.server:main"
 boring-pondnt-d365 = "boring_pondnt.d365_server:main"
+boring-pondnt-d365whsapp = "boring_pondnt.d365whsapp_server:main"
+boring-pondnt-d365web = "boring_pondnt.d365web_server:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

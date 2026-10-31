@@ -9,7 +9,7 @@ decided what to build, tested it, ran it and had the last word.
 - **Documentation** (READMEs, CHANGELOG, `docs/` and other Markdown):
   Creative Commons Attribution-ShareAlike 4.0:
   [LICENSES/CC-BY-SA-4.0.txt](https://github.com/the-boring-crocodile/boring-pondnt/blob/main/LICENSES/CC-BY-SA-4.0.txt).
-- **Public domain (CC0 1.0):** the collaboration kit (`kit/`). They are meant
+- **Public domain (CC0 1.0):** the collaboration handbook (`handbook/`). They are meant
   to become fully yours: [LICENSES/CC0-1.0.txt](https://github.com/the-boring-crocodile/boring-pondnt/blob/main/LICENSES/CC0-1.0.txt).
 
 [REUSE.toml](https://github.com/the-boring-crocodile/boring-pondnt/blob/main/REUSE.toml) says which file is under which licence;

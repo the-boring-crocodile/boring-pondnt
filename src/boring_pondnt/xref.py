@@ -232,7 +232,7 @@ class Xref:
                           "narrow by kind or module instead of paging that deep")
         path = label_path(path) or path
         if not _PATH.fullmatch(path):
-            raise Refused("invalid_request", "path as xref_names returns it, e.g. /Classes/Name or @SYS1", path=path)
+            raise Refused("invalid_request", "path as xref what=names returns it, e.g. /Classes/Name or @SYS1", path=path)
         kind_id = None
         if kind is not None:
             if kind not in KIND_IDS:
@@ -241,7 +241,7 @@ class Xref:
         started = time.monotonic()
         ids = self._ids(path, members)
         if not ids:
-            raise Refused("not_found", "no such name in the cross-reference database; find it with xref_names",
+            raise Refused("not_found", "no such name in the cross-reference database; find it with xref what=names",
                           path=path)
         mine, other = ("TargetId", "SourceId") if direction == "used_by" else ("SourceId", "TargetId")
         where = ""

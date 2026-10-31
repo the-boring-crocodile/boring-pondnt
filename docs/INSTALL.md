@@ -1,8 +1,10 @@
 # Installing pondNT on a D365 dev box
 
-pondNT gives Copilot in Visual Studio two Windows-only MCP servers and three
-independent general services on a Dynamics 365 F&O development box. This
-page takes a box from the download to "Copilot answers through them".
+pondNT gives Copilot in Visual Studio workspace and D365 tools, three
+independent general services, and optional browser and warehouse tools on a
+Dynamics 365 F&O development box. This page takes a box from download to a
+working connection. The recommended layout keeps core and Knowledge direct
+and puts the other selected services behind Ferry.
 Windows gets one scheduled task per server under `\pondNT\`, and nothing
 else: no Windows service, no registry change, no PATH change.
 `.\setup.ps1 -Uninstall` removes the tasks again (step 9).
@@ -49,24 +51,58 @@ zip and inside it.
 After downloading and unpacking (step 1), in an elevated PowerShell window in the unpacked
 folder, look first:
 
-    powershell -ExecutionPolicy Bypass -File .\setup.ps1 -WhatIf
+    powershell -ExecutionPolicy Bypass -File .\setup.ps1 -WhatIf -Gateway all
 
 It looks at the box (PackagesLocalDirectory, an existing index,
 d365fo.tools, the cross-reference database, Defender) and prints a plan. It
 changes nothing, skips the live self-check probes and reports readiness as
 unverified; it does not need elevation. Then apply, in the elevated window:
 
-    powershell -ExecutionPolicy Bypass -File .\setup.ps1
+    powershell -ExecutionPolicy Bypass -File .\setup.ps1 -Gateway all
 
 It asks before each change (`-Yes` answers yes to all but Defender):
 
 - builds the source index if none exists (`-Locales en-US,de`, `-Name`,
   `-Index` to choose; 10-35 minutes with the Defender exclusion, depending on
   the disk; many times longer without it);
-- sets up the five servers on 127.0.0.1, each with its own access key and
-  scheduled task (`-Services sourcecache,knowledge` to pick, `-SkipServices`
-  to skip), and writes their entries into `%USERPROFILE%\.mcp.json`,
-  keeping customized and other entries, with a backup first.
+- sets up the five default services on 127.0.0.1, each with its own access
+  key and scheduled task (`-Services` chooses services, `-SkipServices`
+  skips them);
+- with the recommended `-Gateway all`, adds Ferry and publishes three client
+  entries: `boring-pondnt`, `boring-knowledge` and `boring-gateway`. The
+  gateway offers `service_list`, `service_describe`, `service_read` and
+  `service_call`; Sourcecache, Canvas and D365 are behind it. Browser/WHS
+  join them when selected. Backend tasks, ports and keys remain separate;
+- updates `%USERPROFILE%\.mcp.json` only when its entries or credentials
+  need to change, with a backup first. Customized entries are retained and
+  reported for review; unrelated entries stay in place.
+
+**Why this layout?** Core and notes are useful throughout a conversation.
+The other tools are specialised: Copilot can discover the relevant service
+and its tool descriptions when the task calls for them. Ferry keeps those
+services available without putting every tool into the initial list. When
+that list is sent to the model, its descriptions and schemas consume input
+tokens, even for tools never called. On-demand discovery can reduce this
+up-front context and token cost; the actual saving depends on the client,
+caching and task. Ferry adds discovery calls of its own.
+[Gateway benefits and trade-offs](https://github.com/the-boring-crocodile/boring-services/blob/main/mcp-ferry/README.md#gateways-optional)
+explains the choice. Direct entries remain available if they suit your client better.
+
+`-Gateway all` means all services in this run's selection except core and
+Knowledge. On an existing installation, pass the complete intended
+`-Services` list, including browser/WHS opt-ins you want to keep behind Ferry.
+For an installation using all seven services, that selection is
+`-Services 'sourcecache,knowledge,canvas,core,d365,d365web,d365whsapp'`.
+Retain the correct index path and existing browser environment/company
+configuration; review the preview before applying. These commands use the
+scheduled-task installer. An existing manual launcher needs its own reviewed
+configuration change rather than a change to Windows startup policy.
+
+Alternatives: `-Gateway d365,canvas` carries only those selected services;
+`-Gateway none` restores direct client entries and retires the gateway.
+Omitting the flag uses `keep`, preserving existing routing. The recommendation
+is explicit in the commands above; the installer does not silently convert
+an existing setup.
 
 Without elevation it stops with "Run this in PowerShell as Administrator."
 It never touches Defender unless you agree or add `-AddDefenderExclusion`
@@ -181,7 +217,7 @@ lists the options:
     & "$p\boring-pondnt-d365.cmd" serve --help
 
 - The core: `--config` (the HTTP configuration setup writes),
-  `--kit` (the folder `bootstrap` serves), `--state-dir` (job output and the
+  `--handbook` (the folder `bootstrap` serves), `--state-dir` (job output and the
   call log), `--no-call-log`, `--call-budget` and `--self-check`.
 - The D365 server, `serve`: `--config`, `--powershell` (Windows PowerShell
   5.1, which d365fo.tools needs), `--sql-server` (default `localhost`, for
@@ -222,21 +258,26 @@ so; xref still works. Install it once, in an elevated Windows PowerShell
 
 ## 7. Visual Studio (Copilot)
 
-Visual Studio 2022 17.14+ reads `%USERPROFILE%\.mcp.json`. Setup writes one
-entry per server (tips and sign-in quirks in
-[Copilot in Visual Studio](https://github.com/the-boring-crocodile/boring-pondnt/blob/main/docs/VISUAL_STUDIO_COPILOT.md)):
+Visual Studio 2022 17.14+ reads `%USERPROFILE%\.mcp.json`. With the
+recommended `-Gateway all` layout, setup publishes these three entries
+(tips and sign-in quirks in [Copilot in Visual Studio](VISUAL_STUDIO_COPILOT.md)).
+This is the shape to expect; setup supplies a distinct key for each entry:
 
     {
       "servers": {
         "boring-pondnt": { "type": "http", "url": "http://127.0.0.1:18513/mcp",
-                           "headers": { "Authorization": "Bearer <key>" } },
-        "boring-d365": { "type": "http", "url": "http://127.0.0.1:18514/mcp",
-                         "headers": { "Authorization": "Bearer <key>" } }
+                           "headers": { "Authorization": "Bearer <core-key>" } },
+        "boring-knowledge": { "type": "http", "url": "http://127.0.0.1:18512/mcp",
+                             "headers": { "Authorization": "Bearer <knowledge-key>" } },
+        "boring-gateway": { "type": "http", "url": "http://127.0.0.1:18517/mcp",
+                           "headers": { "Authorization": "Bearer <gateway-key>" } }
       }
     }
 
-The general services get the same kind of entry
-(`boring-sourcecache`, `boring-knowledge`, `boring-canvas`).
+Sourcecache, Canvas, D365 and selected browser/WHS backends do not have
+separate client entries in this layout. Ask Copilot to use Ferry's
+`service_list`, then `service_describe` for the service it needs. With direct
+routing, each service instead has its own HTTP entry and key.
 Setup replaces old generated stdio entries with the HTTP ones;
 an entry you changed by hand stays as it is and is reported, so the tools are
 never offered twice. Entries from older releases (`pondnt`, `d365`, `d365-xref`,
@@ -248,7 +289,7 @@ call them. It asks for approval per tool; each server's menu in the tools
 picker also offers "Run all tools automatically".
 
 **If tools seem missing,** ask Copilot to list its tools first. Visual
-Studio's own built-in tools may not appear in the tools picker. The kit's
+Studio's own built-in tools may not appear in the tools picker. The handbook's
 `visualstudio.md` describes what Copilot may change in the IDE and when to
 restart a session.
 
@@ -258,8 +299,13 @@ triangle next to it) and choose **Restart**. Visual Studio 17.14 may then
 close without a word: start it again. The new tool is listed, possibly
 unticked: tick it.
 
-**After setup, if the tools picker has no "GitHub Copilot" group:** setup
-rewrote `.mcp.json`, and Visual Studio restarted its Copilot agent; sometimes
+Setup writes `.mcp.json` only when client entries or credentials need to change.
+An unchanged setup or a backend-only Ferry change preserves its bytes and
+modification time without making a backup. Changes inside a backend do not
+require a new client entry while the gateway URL and key stay the same.
+
+**After setup, if the tools picker has no "GitHub Copilot" group:** a needed
+`.mcp.json` update restarted Visual Studio's Copilot agent; sometimes
 Copilot's own tools do not come back. Restart Visual Studio or sign in to
 GitHub again.
 
@@ -273,19 +319,27 @@ elevated (its task's highest run level), as d365fo.tools needs.
 In Visual Studio, open Copilot Chat, switch to **Agent** mode, start a new
 thread and ask:
 
-    Call bootstrap on boring-pondnt and tell me the server version and the kit folder.
+    Call bootstrap on boring-pondnt and tell me the server version and the handbook folder.
 
 Copilot asks to approve the call. The answer names `boring-pondnt-core`, its
-version, and the kit folder `%LOCALAPPDATA%\\boring-pondnt\\kit`. The answer
-also asks Copilot to read the kit's agreement, housekeeping and persona next.
+version, and the handbook folder `%LOCALAPPDATA%\\boring-pondnt\\handbook`. The answer
+also asks Copilot to read the handbook's agreement, housekeeping and persona next.
 Whether it does, and whether it takes on the persona's voice, is Copilot's
 call: asked only for the bootstrap call, it may report and stop there. Ask it
-to follow the bootstrap if you want the whole kit; "Plain, please" switches
+to follow the bootstrap if you want the whole handbook; "Plain, please" switches
 the voice off for the session. Nothing on the box changes.
 
-Start every new thread the same way: the kit asks Copilot to call
+With the recommended layout, also ask:
+
+    Use boring-gateway's service_list and describe the D365 service. Report what is available; do not run a build or change data.
+
+This checks discovery through Ferry. A listening gateway alone does not prove
+that its backends answer; inspect their reported availability. Core and
+Knowledge should still appear as direct servers.
+
+Start every new thread the same way: the handbook asks Copilot to call
 `bootstrap` at the start of each fresh context. To make that automatic for a
-repository, merge the kit's `copilot-instructions.md` into its
+repository, merge the handbook's `copilot-instructions.md` into its
 `.github/copilot-instructions.md`.
 
 ## 9. Remove
@@ -302,9 +356,29 @@ changed by hand are kept and reported.
 
 Then delete by hand what it lists, as you want: the service data
 (keys, notebook, canvases, logs) in `%LOCALAPPDATA%\boring-pondnt\services`,
-the kit in `%LOCALAPPDATA%\boring-pondnt\kit`, the index file and its folder,
+the handbook in `%LOCALAPPDATA%\boring-pondnt\handbook`, the index file and its folder,
 state and logs in `%LOCALAPPDATA%\boring-pondnt` (unless `--state-dir` said
 otherwise), and last the folder `$p`.
+
+### Recovery after an interrupted setup
+
+Setup records each apply/uninstall attempt under
+`%LOCALAPPDATA%\boring-pondnt\setup-attempts\`. The JSON records contain
+paths, chosen services/routing, the last saved phase and completed service
+steps. They contain no access keys. A setup killed between saves may have
+completed its current step; inspect the actual tasks/listeners before retrying.
+
+A failed startup stops client publication and old-key retirement. Some
+services may already have restarted. The existing client file stays until
+publication succeeds; after publication, a cleanup failure leaves the new
+client in place. Setup reports failure and the recovery-record path.
+
+Read that record's `retry_preview` command first. It includes the full service
+selection, explicit routing, index and client path, so a retry retains opt-in
+backends even after a partial routing change. Run the preview, resolve any
+ownership/conflict messages, then use `retry_apply` to retry with normal prompts.
+Keep the named release folder until recovery is complete. Existing notebook,
+canvas, handbook and index data stay in their original locations.
 
 ## Optional: reaching the box from a Pond
 
@@ -318,7 +392,17 @@ it, and nothing of it runs unless you start it.
 
 ### What setup installs
 
-Five scheduled tasks under `\pondNT\`, each starting one server on
+This section describes the standard **Task Scheduler installation** created
+by `setup.ps1`. The account and trigger columns below are not properties of
+HTTP or Ferry routing: Ferry forwards calls to separately running backends;
+it does not start or supervise them. If an operator uses a separate manual
+launcher, its processes run under the launching account and start when that
+launcher runs. Such a launcher has its own recovery arrangements; this setup
+command manages scheduled tasks.
+
+The recommended base setup has six scheduled tasks: five services plus
+Ferry. Selecting both browser/WHS opt-ins makes eight. Without Ferry, the
+base setup has five. Tasks live under `\pondNT\`, each starting one server on
 127.0.0.1. Each restarts up to three times, a minute apart, and has no time
 limit. `%LOCALAPPDATA%` is that of the person who ran setup.
 
@@ -326,26 +410,31 @@ limit. `%LOCALAPPDATA%` is that of the person who ran setup.
 |---|---|---|---|---|---|
 | `pondNT boring-pondnt` | core, 18513 | you, through `pythonw.exe` (no window) | at logon | yes (highest run level) | `%LOCALAPPDATA%\boring-pondnt\services\core` |
 | `pondNT boring-d365` | D365 server, 18514 | you, through `pythonw.exe` | at logon | yes | `...\services\d365` |
+| `pondNT boring-d365web` | D365 browser, 18516 (opt-in) | you, through `pythonw.exe` | at logon | yes | `...\services\d365web` |
+| `pondNT boring-d365whsapp` | WHS app/form, 18515 (opt-in) | you, through `pythonw.exe` | at logon | yes | `...\services\d365whsapp` |
 | `pondNT boring-sourcecache` | Sourcecache, 18501 | SYSTEM | at boot | yes | `...\services\sourcecache`; the index file where `-Index` says |
 | `pondNT boring-knowledge` | Knowledge, 18512 | SYSTEM | at boot | yes | `...\services\knowledge` (`notebook.db`) |
 | `pondNT boring-canvas` | Canvas, 18511 (web page 18510) | SYSTEM | at boot | yes | `...\services\canvas` |
+| `pondNT boring-gateway` | the gateway (boring-mcp-ferry), 18517; only with `-Gateway` | SYSTEM | at boot | yes | `...\services\gateway` (`ferry.json`, one `<service>.headers.json` per service behind it: that service's key) |
 
 Each folder holds the server's `config.json`, `keys.json` and `service.log`.
 Besides the tasks, setup writes:
 
-- `%USERPROFILE%\.mcp.json`: one entry per server, after a backup next to it
-  (`.mcp.json.bak-<time>-<id>`);
-- `%LOCALAPPDATA%\boring-pondnt\kit`: the kit, copied once;
+- `%USERPROFILE%\.mcp.json`: three entries for the recommended layout,
+  or one per directly exposed server. A needed change gets a backup next to
+  it (`.mcp.json.bak-<time>-<id>`); an unchanged file is left alone;
+- `%LOCALAPPDATA%\boring-pondnt\handbook`: the handbook, copied once;
 - the source index, if it builds one;
 - Defender process exclusions for this release's `python.exe` and
   `pythonw.exe`, only if you agree.
 
 The core keeps its job output and call log in `%LOCALAPPDATA%\boring-pondnt`.
-The Pond tunnel, when used, takes ports 18520 and 18522.
+The optional Pond tunnel takes 18520/18522 for core/D365 and 18524/18526 for
+the warehouse/browser servers.
 
 `.\setup.ps1 -Uninstall` removes the `.mcp.json` entries and the tasks it
 recognises as its own, and offers to remove the Defender exclusions. It keeps
-the folders, the kit and the index, and lists them for you (step 9).
+the folders, the handbook and the index, and lists them for you (step 9).
 
 ### Why these accounts
 
@@ -377,8 +466,9 @@ and complete service command before setup can stop them.
 Every server lets in only callers it knows. On this machine that is an
 **access key** per server. Setup makes one key per server for you (role
 writer, one year; running setup again renews it when fewer than 30 days are
-left) and puts it into the server's `.mcp.json` entry as
-`Authorization: Bearer ...`. The servers listen on this machine's loopback
+left). A directly exposed server's key goes into its `.mcp.json` entry as
+`Authorization: Bearer ...`. A backend behind Ferry instead has its key in
+`services\gateway\<service>.headers.json`; the client holds Ferry's own key. The servers listen on this machine's loopback
 interface only, but the key itself is not bound to the device: it is a bearer
 secret, and whoever holds it and can reach the port acts with its role. Keep
 `.mcp.json` private.
@@ -390,10 +480,10 @@ secret, and whoever holds it and can reach the port acts with its role. Keep
     boring-service-keys.cmd remove --file <folder>\keys.json --id <id>
 
 Roles are enforced per tool. A reader may read and search files, list and
-observe jobs (`job_list`, `job_wait`, `job_output`), and use `d365_status`,
-`d365_models`, `d365_results` and the `xref_*` tools. Everything else needs
-writer: file writes and patches, `exec`, `job_start`, `job_stop`, and the D365
-build, sync, best practice, environment, `d365_job` and `d365_sql` tools. A
+observe jobs (`job_list`, `job_wait`, `job_output`), and use `d365_results` and
+`xref`. Everything else needs writer: file writes and patches, `exec`,
+`job_start`, `job_stop`, and the D365 build, sync, best practice, `d365_run`,
+`d365_job` and `d365_sql` tools. A
 reader's `batch` is checked step by step before any step runs; one writer step
 refuses the whole batch.
 
@@ -402,13 +492,18 @@ effect at the next call, no restart. In Visual Studio such a key belongs in a
 password input rather than in plain text:
 `"headers": {"Authorization": "Bearer ${input:knowledge-key}"}`.
 
-### The kit
+### The handbook
 
-The core serves `%LOCALAPPDATA%\boring-pondnt\kit`.
-The first setup copies the release's `kit\` there; later releases never
-overwrite it. Setup prints which files differ from the new release's kit, for
+An install from before the handbook (a state `kit` folder) is not migrated:
+setup refuses before configuring anything. Uninstall it with its own setup
+(`-Uninstall`), move `%LOCALAPPDATA%\boring-pondnt\kit` aside (copy your own
+edits into the handbook later), then run this setup.
+
+The core serves `%LOCALAPPDATA%\boring-pondnt\handbook`.
+The first setup copies the release's `handbook\` there; later releases never
+overwrite it. Setup prints which files differ from the new release's handbook, for
 you to compare and merge by hand (the release's copy stays in its folder;
-bootstrap names it `release_kit`). To take a release's kit as it is, rename or
+bootstrap names it `release_handbook`). To take a release's handbook as it is, rename or
 remove that folder and run setup again. `-Uninstall` keeps it.
 
 ### The general services on their own

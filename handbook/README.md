@@ -1,12 +1,12 @@
-# The kit
+# The handbook
 
 The working method served by boring-pondnt-core through bootstrap. A release
-ships it as `<release>/kit`; setup.ps1 copies it once to
-`%LOCALAPPDATA%\boring-pondnt\kit`, and the core serves that copy. These are
+ships it as `<release>/handbook`; setup.ps1 copies it once to
+`%LOCALAPPDATA%\boring-pondnt\handbook`, and the core serves that copy. These are
 shared guidance documents, not permissions or proof that a particular machine
 behaves as described.
 
-Write for models working inside Copilot: short, literal instructions, concrete
+Write for the model inside VS/GitHub Copilot: short, literal instructions, concrete
 syntax and discoverable tool names. Keep the action beside its condition. Scope
 established facts to the evidence; do not weaken them into anecdotes merely to
 sound cautious. Preserve examples that teach the craft or the voice.
@@ -23,7 +23,7 @@ Read the relevant task guides:
 - [Engineering practice](practice.md): implementation, investigation,
   testing, reports and proportionate use of context.
 - [D365](d365.md): extension mechanisms, data semantics and acceptance.
-- [Warehouse/mobile](warehouse.md): request state, transactions and device tests.
+- [Warehouse/mobile](warehouse.md): request state, transactions, device tests, watching a flow.
 - [Tools](tools.md): core/D365 job ownership, SQL and optional services.
 
 The [repository snippet](copilot-instructions.md) can be merged into an existing
@@ -36,21 +36,22 @@ Authority and engineering standards do not depend on the persona.
 ## Adaptation and updates
 
 Keep project/customer context in the project's approved records, not this
-redistributable kit. The served kit is the owner's copy outside the release
-folders: a later release never overwrites it. Setup reports which files differ
-from that release's kit, and bootstrap names the release's kit as
-`release_kit`; review and merge those changes deliberately with the owner, do
-not quietly rewrite the agreement. A changed kit is not loaded into an existing
+redistributable handbook. The served handbook is the owner's copy outside the release
+folders: a later release never overwrites its contents. An install from before
+the handbook (a `kit` folder) is not migrated: setup refuses and says how to reinstall. Setup reports which files differ
+from that release's handbook, and bootstrap names the release's handbook as
+`release_handbook`; review and merge those changes deliberately with the owner, do
+not quietly rewrite the agreement. A changed handbook is not loaded into an existing
 conversation until it is read again.
 
-Validate a changed kit with a fresh conversation: required reads, ordinary
+Validate a changed handbook with a fresh conversation: required reads, ordinary
 authorized work, IDE failure without an external workaround, lost context,
 stale evidence and report-only behavior. Reading and text checks alone do not
 establish Copilot, designer, build or device behavior.
 
 ## Origin
 
-The agreement and practice derive from an earlier working kit for Copilot,
+The agreement and practice derive from an earlier working handbook for Copilot,
 shaped by Wald's collaboration with the Boring Crocodile.
 Fitzwilliam's early D365 work contributed lessons about IDE paths, read-back,
 metadata, builds, device testing and continuity; a review separated durable
@@ -59,4 +60,4 @@ practices from observations and kept the concrete craft examples.
 Living project knowledge is deliberately not bundled as guidance. Methods and mechanisms live with their owners;
 project state stays with its project.
 
-The kit is CC0 as described in the repository's COPYING.md.
+The handbook is CC0 as described in the repository's COPYING.md.

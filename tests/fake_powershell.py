@@ -83,6 +83,12 @@ def session() -> None:
             print(SECRET_LINE, flush=True)
             print("@@RESULT " + json.dumps({"ok": True, "value": None}), flush=True)
             continue
+        if "| Out-String -Width 220" in script:  # d365_run: the console text, with a labelled password
+            text = "Name       Status\nAOSService Running\nconnect: " + SECRET_LINE + "\n"
+            if "Long-Output" in script:
+                text = "y" * 95 + " " + SECRET_LINE + "\n" + "z" * 300
+            print("@@RESULT " + json.dumps({"ok": True, "value": text}), flush=True)
+            continue
         value = next((answer for needle, answer in ANSWERS if needle in script), None)
         print("@@RESULT " + json.dumps({"ok": True, "value": value}), flush=True)
 

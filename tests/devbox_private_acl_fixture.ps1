@@ -13,10 +13,14 @@ $acl.AddAccessRule($rule)
 Set-Acl -LiteralPath $root -AclObject $acl
 Set-Content -LiteralPath (Join-Path $root 'synthetic-secret') -Value 'fixture-only'
 Assert-PrivateDevboxCredentials $root
+$ownerRights = New-Object Security.Principal.SecurityIdentifier('S-1-3-4')
+$acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule($ownerRights, 'Modify', $inherit, 'None', 'Allow')))
+Set-Acl -LiteralPath $root -AclObject $acl
+Assert-PrivateDevboxCredentials $root
 $everyone = New-Object Security.Principal.SecurityIdentifier('S-1-1-0')
 $acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule($everyone, 'ReadAndExecute', $inherit, 'None', 'Allow')))
 Set-Acl -LiteralPath $root -AclObject $acl
 $refused = $false
 try { Assert-PrivateDevboxCredentials $root } catch { $refused = $true }
 if (-not $refused) { throw 'Broad credential ACL was accepted' }
-'PASS: private credential tree accepted; broad read grant refused'
+'PASS: private credential tree accepted (also with OWNER RIGHTS); broad read grant refused'

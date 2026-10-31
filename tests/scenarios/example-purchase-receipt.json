@@ -1,0 +1,33 @@
+{
+  "name": "Example: open a purchase order, then receive it on the device",
+  "parameters": {
+    "web_service": {"example": "devbox-d365web", "about": "Pond service name of d365web on the target box"},
+    "whs_service": {"example": "devbox-d365whsapp", "about": "Pond service name of d365whsapp on the target box"},
+    "company": {"example": "usmf", "about": "legal entity of the test data"},
+    "po": {"example": "00000273", "about": "an open purchase order with one line"},
+    "worker": {"example": "24", "about": "warehouse worker (user id) on the device"}
+  },
+  "requires": "An open purchase order in the company and a mobile device menu with purchase receiving.",
+  "changes": "Registers the purchase order line on the device.",
+  "parts": [
+    {
+      "service": "${web_service}",
+      "tool": "web_run_scenario",
+      "note": "check the order in the back office",
+      "arguments": {"steps": [
+        {"op": "open", "menu_item": "PurchTableListPage", "company": "${company}", "expect": {"form": "PurchTable"}},
+        {"op": "filter", "column": "Purchase order", "value": "${po}", "expect": {"grid": {"rows": 1}}}
+      ]}
+    },
+    {
+      "service": "${whs_service}",
+      "tool": "whs_run_scenario",
+      "note": "receive it on the device",
+      "arguments": {"worker": "${worker}", "steps": [
+        {"press": "Inbound", "expect": {"title": "Inbound"}},
+        {"press": "PO receiving", "expect": {"step": "PONum"}},
+        {"values": {"PONum": "${po}"}, "press": "OK", "expect": {"message_kind": "info"}}
+      ]}
+    }
+  ]
+}

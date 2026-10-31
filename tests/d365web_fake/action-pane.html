@@ -1,0 +1,56 @@
+<!doctype html>
+<!-- Detached pane ownership observed on the test box: expanded tab ID + "_flyout", under BODY. -->
+<html><head><meta charset="utf-8"><title>Pane fixture</title><style>
+body { margin:0; font:14px sans-serif; }
+form { width:800px; height:640px; }
+.appBarTab-content { padding:12px; background:#eee; }
+.appBar-flyout { position:absolute; top:80px; left:0; width:800px; min-height:60px; }
+#foreign { position:absolute; left:850px; top:400px; width:300px; height:100px; }
+#other_WorkTab_flyout { left:850px; top:520px; width:300px; }
+.overlay { position:absolute; top:200px; left:300px; width:300px; height:100px; background:white; border:1px solid; }
+</style></head><body>
+<form data-dyn-role="Form" data-dyn-form-name="PaneForm" id="main">
+  <div data-dyn-role="AppBarTab" data-dyn-controlname="WorkTab" id="pane_WorkTab">
+    <button type="button" aria-expanded="true" id="work">Work</button>
+    <div class="appBarTab-content" id="content">
+      <button type="button" data-dyn-role="MenuItemButton" data-dyn-controlname="ViewHistory" id="history">Employment history</button>
+      <button type="button" data-dyn-role="MenuItemButton" data-dyn-controlname="DisabledAction" disabled>Disabled action</button>
+    </div>
+  </div>
+  <button type="button" data-dyn-role="CommandButton" data-dyn-controlname="TogglePin" id="pin">Toggle pin</button>
+  <div data-dyn-role="Input" data-dyn-controlname="Result"><input id="result" readonly value=""></div>
+  <button type="button" data-dyn-role="CommandButton" data-dyn-controlname="OpenDialog" id="dialog">Open dialog</button>
+  <button type="button" data-dyn-role="CommandButton" data-dyn-controlname="OpenLookup" id="lookup">Open lookup</button>
+</form>
+<div class="appBar-flyout" id="pane_WorkTab_flyout" aria-hidden="true" style="display:none"></div>
+<form data-dyn-role="Form" data-dyn-form-name="OtherForm" id="foreign">
+  <div data-dyn-role="AppBarTab" data-dyn-controlname="WorkTab" id="other_WorkTab">
+    <button type="button" aria-expanded="true">Other work</button>
+  </div>
+</form>
+<div class="appBar-flyout" id="other_WorkTab_flyout">
+  <button type="button" data-dyn-role="MenuItemButton" data-dyn-controlname="ViewHistory">Employment history</button>
+  <button type="button" data-dyn-role="MenuItemButton" data-dyn-controlname="ForeignOnly">Foreign only</button>
+</div>
+<script>
+window.$dyn = {clientBusy: () => false};
+const content = document.getElementById('content'), tab = document.getElementById('pane_WorkTab');
+const flyout = document.getElementById('pane_WorkTab_flyout'), head = document.getElementById('work');
+let pinned = true;
+const expanded = on => { head.setAttribute('aria-expanded', String(on)); flyout.style.display = on ? 'block' : 'none'; flyout.setAttribute('aria-hidden', String(!on)); };
+document.getElementById('pin').onclick = () => {
+  pinned = !pinned;
+  if (pinned) { tab.appendChild(content); expanded(false); head.setAttribute('aria-expanded', 'true'); }
+  else { flyout.appendChild(content); expanded(false); }
+};
+head.onclick = () => { if (!pinned) expanded(head.getAttribute('aria-expanded') !== 'true'); };
+document.getElementById('history').onclick = () => { document.getElementById('result').value = 'history'; };
+for (const kind of ['dialog', 'lookup']) document.getElementById(kind).onclick = () => {
+  const overlay = document.createElement('div'); overlay.className = 'overlay';
+  if (kind === 'dialog') { overlay.setAttribute('role','dialog'); overlay.setAttribute('data-dyn-form-name','PaneDialog'); }
+  else { overlay.setAttribute('data-dyn-role','Popup'); overlay.classList.add('lookup-popup'); }
+  overlay.innerHTML = '<button type="button" data-dyn-role="MenuItemButton" data-dyn-controlname="ViewHistory">Employment history</button>';
+  overlay.querySelector('button').onclick = () => { document.getElementById('result').value = kind; overlay.remove(); };
+  document.body.appendChild(overlay);
+};
+</script></body></html>

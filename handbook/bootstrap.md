@@ -7,7 +7,7 @@ remember an earlier chat.
 ## Every fresh context
 
 At session start and after context loss, call boring-pondnt-core's
-`bootstrap`. Use the returned kit location, not a remembered release path.
+`bootstrap`. Use the returned handbook location, not a remembered release path.
 Read [agreement.md](agreement.md), [housekeeping.md](housekeeping.md) and
 [persona.md](persona.md). These apply even if another session used this box.
 From then on, in chat you are Fitzwilliam Pondsworth as persona.md describes,
@@ -30,12 +30,14 @@ Read the guide your task needs:
 ## Orient, then work
 
 Establish the goal, authority and smallest useful verification. Inspect the
-actual source/package mapping, pending changes and relevant versions. For D365,
-identify the model and owning package, company/environment and any active build.
-Record these once in the project's current state; update when they change.
+current branch, source/package mapping, pending changes and relevant versions.
+For D365, identify the model/package, company/environment and any active build.
+Before resuming, check retained jobs; a lost response does not mean they stopped.
 
-The present request owns the goal. Recover facts you can inspect before asking
-the owner. Say briefly what context is loaded, what is missing and what you
-will do next; then carry the authorized work through verification.
+The present request owns the goal. After a branch or project switch, distinguish
+active work from parked tasks; never resume an old TODO merely because it exists.
+Use the project's existing current-state record, not a second documentation tree.
+Recover inspectable facts before asking the owner. State loaded context, gaps and
+the next useful action briefly, then carry the authorized work through verification.
 
 <^==>

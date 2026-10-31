@@ -99,6 +99,32 @@ foreach ($suffix in @(' unexpected', [string][char]160)) {
 $script:launchSuffix = ''
 'PASS: launch separators retained exactly; changed commands and non-ASCII suffixes refuse.'
 
+$file = Join-Path $Fixture 'ensure-tunnel.json'
+$record = Read-DevboxRecord $file
+Require ((Resolve-DevboxTunnel $record $file) -eq 'absent') 'No tunnel entry must be absent.'
+$entry = Start-DevboxEntry 'tunnel' 'C:\fixture\ssh.exe' @('-N','fixture@host') $Fixture $file $record
+Require ((Resolve-DevboxTunnel $record $file) -eq 'running') 'Live recorded tunnel must be running.'
+$beforeKills = $script:kills
+$alive = $script:fakeProcess
+$script:fakeProcess = $null
+Require ((Resolve-DevboxTunnel $record $file) -eq 'absent') 'Ended tunnel must be absent.'
+Require ((Read-DevboxRecord $file).entries[0].state -eq 'stopped') 'Ended tunnel not recorded as stopped.'
+$entry = Start-DevboxEntry 'tunnel' 'C:\fixture\ssh.exe' @('-N','fixture@host') $Fixture $file $record
+$script:fakeProcess.StartTime = $script:fakeProcess.StartTime.AddSeconds(5)
+Require ((Resolve-DevboxTunnel $record $file) -eq 'absent') 'PID taken by a later process must count as ended.'
+Require ($script:kills -eq $beforeKills) 'Resolving the tunnel must never kill a process.'
+$script:fakeProcess.StartTime = $script:fakeProcess.StartTime.AddSeconds(-5)
+$entry = Start-DevboxEntry 'tunnel' 'C:\fixture\ssh.exe' @('-N','fixture@host') $Fixture $file $record
+$script:cim.CommandLine += ' changed'
+Refuses { Resolve-DevboxTunnel $record $file }
+$script:cim.CommandLine = $entry.commandline
+$entry.state = 'stopping'
+Refuses { Resolve-DevboxTunnel $record $file }
+$entry.state = 'starting'
+Refuses { Resolve-DevboxTunnel $record $file }
+Require ($script:kills -eq $beforeKills) 'Refusals must not kill.'
+'PASS: ensure-tunnel: absent, running, ended and reused PID restart; changed command, stop in progress and unknown start refuse.'
+
 $quoted = Quote-DevboxArgument 'C:\path with space\'
 Require ($quoted -ceq '"C:\path with space\\"') 'Trailing-backslash quoting failed.'
 Refuses { Quote-DevboxArgument ("bad" + [char]10 + "argument") }

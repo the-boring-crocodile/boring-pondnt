@@ -69,58 +69,38 @@ def test_redact_masks_passwords_in_every_form():
     assert "abc" not in redact("connect=x;Password='abc") and "def" not in redact('Pwd="def')  # cut off, unclosed
 
 
-def test_tools_are_thirteen_and_small(server):
+def test_tools_are_eight_and_small(server):
+    """D40: own tools only where they redact, parse or guard; d365_run for the rest of d365fo.tools."""
     tools = asyncio.run(server.list_tools())
     assert sorted(t.name for t in tools) == sorted([
-        "d365_status", "d365_models", "d365_build", "d365_results", "d365_db_sync",
-        "d365_best_practice", "d365_environment", "d365_job", "d365_sql",
-        "xref_info", "xref_names", "xref_references", "xref_hierarchy"])
+        "d365_build", "d365_results", "d365_db_sync", "d365_best_practice", "d365_job", "d365_sql",
+        "d365_run", "xref"])
     assert all(len(t.description or "") <= 120 for t in tools)
     assert len(json.dumps([t.model_dump(exclude_none=True) for t in tools])) < 8500
 
 
-def test_status_reports_session_and_environment(server):
-    is_error, data = call(server, "d365_status")
-    assert not is_error
-    assert data["session"]["state"] == "ready" and data["session"]["d365fo_tools"] == "0.7.34-fake"
-    assert data["elevated"] is True and data["services"][0]["status"] == "Running"
+def test_run_returns_text_masked_and_bounded(server):
+    is_error, data = call(server, "d365_run", {"command": "Get-D365Environment"})
+    assert not is_error and "AOSService" in data["output"] and "Password=***" in data["output"]
+    assert "truncated" not in data and data["chars"] >= len(data["output"])  # the server masks results once more
+    # the password sits past the cut: it is masked before cutting, never split
+    is_error, data = call(server, "d365_run", {"command": "Long-Output", "max_chars": 100})
+    assert not is_error and data["truncated"] is True and len(data["output"]) == 100 and data["chars"] > 100
 
 
-def test_status_right_after_start_answers_at_once(fake_ps, tmp_path):
-    """The first d365_status after a (re)start never waits for the session: the environment
-    when it is ready, otherwise the state and a note to ask again (a client may give up on
-    a slow call and show nothing)."""
-    import time
-    server = create_server(fake_ps, tmp_path)  # no waiting: the session may still be loading
-    try:
-        started = time.monotonic()
-        is_error, data = call(server, "d365_status")
-        assert time.monotonic() - started < 5
-        assert not is_error
-        if data["session"]["state"] == "ready":
-            assert "services" in data
-        else:
-            assert data["session"]["state"] == "loading" and "still loading" in data["note"]
-    finally:
-        server._d365_close()
+def test_run_refuses_bad_requests_before_powershell(server):
+    for args in ({"command": "  "}, {"command": "x" * 20_001}, {"command": "Get-D365Model", "timeout": 0},
+                 {"command": "Get-D365Model", "timeout": 601}, {"command": "Get-D365Model", "max_chars": 0}):
+        is_error, data = call(server, "d365_run", args)
+        assert is_error and data["code"] == "invalid_request", args
 
 
-def test_status_while_still_loading_says_so_at_once(server, monkeypatch):
-    import time
-    session = server._d365_session
-    monkeypatch.setattr(session, "state", {"state": "loading", "since": "now"})
-    started = time.monotonic()
-    is_error, data = call(server, "d365_status")
-    assert time.monotonic() - started < 1
-    assert not is_error and data["session"]["state"] == "loading"
-    assert "still loading" in data["note"] and "services" not in data
-
-
-def test_models_live(server):
-    _, data = call(server, "d365_models", {"exclude_microsoft": True})
-    assert data["total"] == 2 and data["models"][1]["name"] == "ContosoExt"
-    is_error, data = call(server, "d365_models", {"name": "x; Remove-Item C:\\"})
-    assert is_error and data["code"] == "invalid_request"
+def test_run_in_the_background_is_a_job(server):
+    is_error, data = call(server, "d365_run", {"command": "Restart-D365Environment -Aos", "background": True})
+    assert not is_error and data["kind"] == "run"
+    _, done = call(server, "d365_job", {"job_id": data["job_id"], "wait_seconds": 15})
+    assert not done["wait_expired"] and done["exit_code"] == 0
+    assert any("Password=***" in line for line in done["tail"])
 
 
 def test_dry_runs_show_the_command_masked(server):
@@ -185,7 +165,7 @@ def test_job_wait_does_not_restart_or_stop_work(server):
 
 @pytest.mark.parametrize("seconds", [-1, 61, float("nan"), float("inf")])
 def test_job_wait_owner_refuses_out_of_bounds_before_process_access(tmp_path, seconds):
-    from boring_pondnt.d365 import Jobs
+    from boring_pondnt.d365 import Job, Jobs
     from boring_service_kit.outcomes import Refused
     with pytest.raises(Refused) as error:
         Jobs("unused", tmp_path).wait("unknown", seconds)
@@ -308,29 +288,6 @@ def test_results_fallback_does_not_hide_unreadable_local_log(server, tmp_path, m
     assert is_error and data["code"] == "unreadable"
 
 
-def test_environment_actions(server):
-    _, data = call(server, "d365_environment", {"action": "restart", "services": "aos"})
-    assert data["now"][0] == {"name": "AOSService", "status": "Running"}
-    _, data = call(server, "d365_environment", {"action": "start"})
-    assert len(data["now"]) == 2
-    for args in ({"action": "reboot"}, {"action": "stop", "services": "all,aos"}, {"action": "stop", "services": "web"}):
-        is_error, data = call(server, "d365_environment", args)
-        assert is_error and data["code"] == "invalid_request"
-
-
-def test_a_failed_environment_action_still_says_where_things_are(server):
-    is_error, data = call(server, "d365_environment", {"action": "stop", "services": "batch"})
-    assert is_error and data["code"] == "command_failed"
-    assert data["details"]["now"][0] == {"name": "AOSService", "status": "Running"}
-
-
-def test_stopped_iis_does_not_claim_application_outage_or_prescribe_start(server):
-    _, data = call(server, "d365_status")
-    assert data["aos"] == "Stopped"
-    assert "IIS Express" in data["note"] and "does not establish" in data["note"]
-    assert "d365_environment start" not in data["note"] and "will fail" not in data["note"]
-
-
 def test_command_failures_and_noise_are_masked(fake_ps, tmp_path):
     session = Session(fake_ps)
     session.start()
@@ -346,9 +303,9 @@ def test_command_failures_and_noise_are_masked(fake_ps, tmp_path):
 def test_server_masks_failures(server):
     session = server._d365_session
     original = session.call
-    session.call = lambda script, timeout=None: original("Throw-Me")  # every PowerShell call fails
+    session.call = lambda script, timeout=None, with_host=False: original("Throw-Me")  # every call fails
     try:
-        is_error, data = call(server, "d365_models")
+        is_error, data = call(server, "d365_run", {"command": "Get-D365Model"})
     finally:
         session.call = original
     assert is_error and data["code"] == "command_failed" and "Password=***" in data["message"]
@@ -372,9 +329,8 @@ def test_missing_module_is_refused_with_advice(fake_ps, tmp_path, monkeypatch):
     monkeypatch.setenv("FAKE_PS_MODE", "no_module")
     s = ready_server(fake_ps, tmp_path)
     try:
-        _, status = call(s, "d365_status")
-        assert status["session"]["state"] == "no_module"
-        is_error, data = call(s, "d365_models")
+        assert s._d365_session.state["state"] == "no_module"
+        is_error, data = call(s, "d365_run", {"command": "Get-D365Model"})
         assert is_error and data["code"] == "not_found" and "ask the user" in data["message"]
         is_error, data = call(s, "d365_build", {"module": "ContosoExt"})
         assert is_error and data["code"] == "not_found"
@@ -385,10 +341,10 @@ def test_missing_module_is_refused_with_advice(fake_ps, tmp_path, monkeypatch):
 def test_loading_is_refused_as_locked(fake_ps, tmp_path):
     s = create_server(fake_ps, tmp_path, start_session=False)
     s._d365_session.state = {"state": "loading", "since": "now"}
-    is_error, data = call(s, "d365_models")
+    is_error, data = call(s, "d365_run", {"command": "Get-D365Model"})
+    assert is_error and data["code"] == "locked" and "still loading" in data["message"]
+    is_error, data = call(s, "d365_run", {"command": "Get-D365Model", "background": True})
     assert is_error and data["code"] == "locked"
-    _, status = call(s, "d365_status")
-    assert status["session"]["state"] == "loading"
 
 
 def test_a_huge_dry_run_is_cut_and_says_so(server):
@@ -425,11 +381,11 @@ def test_best_practice_results_show_warnings_by_default(fake_ps, tmp_path):
 
 
 def test_job_tail_drops_clixml(tmp_path):
-    from boring_pondnt.d365 import Jobs
+    from boring_pondnt.d365 import Job, Jobs
     jobs = Jobs("unused", tmp_path)
     log = tmp_path / "x.log"
     log.write_text("#< CLIXML\n<Objs Version=\"1.1.0.1\"><Obj/></Objs>\nBuild completed\n")
-    jobs._jobs["j"] = {"log": str(log)}
+    jobs._jobs["j"] = Job("j", "fixture", str(log), 0)
     assert jobs.tail("j", 10) == ["Build completed"]
 
 
@@ -619,6 +575,66 @@ def test_sql_server_messages_are_its_own_words():
     assert clean(two) == "Violation of PRIMARY KEY constraint 'I_1'. The statement has been terminated."
 
 
+@pytest.mark.parametrize("call_budget,default_timeout", [(None, 60), (28.0, 28)])
+def test_run_foreground_default_fits_the_call_budget(fake_ps, tmp_path, monkeypatch,
+                                                    call_budget, default_timeout):
+    s = ready_server(fake_ps, tmp_path, call_budget=call_budget)
+    seen = []
+    original = s._d365_session.call
+
+    def recorded(script, timeout=None, with_host=False):
+        seen.append(timeout)
+        return original(script, timeout=timeout, with_host=with_host)
+
+    monkeypatch.setattr(s._d365_session, "call", recorded)
+    try:
+        tools = asyncio.run(s.list_tools())
+        schema = next(t.input_schema for t in tools if t.name == "d365_run")
+        assert schema["properties"]["timeout"]["default"] == default_timeout
+        is_error, data = call(s, "d365_run", {"command": "Get-D365Environment"})
+        assert not is_error and "AOSService" in data["output"]
+        assert seen == [default_timeout]
+        # Explicit limits stay explicit: do not silently clamp an invalid request.
+        maximum = int(min(600, call_budget)) if call_budget else 600
+        for timeout in (0, maximum + 1):
+            is_error, data = call(s, "d365_run", {"command": "Get-D365Model", "timeout": timeout})
+            assert is_error and data["code"] == "invalid_request"
+        assert seen == [default_timeout]
+    finally:
+        s._d365_close()
+
+
+@pytest.mark.parametrize("timeout_args", [{}, {"timeout": 600}])
+def test_run_background_uses_jobs_not_the_foreground_timeout(fake_ps, tmp_path, timeout_args):
+    s = ready_server(fake_ps, tmp_path, call_budget=28.0)
+    try:
+        is_error, data = call(s, "d365_run", {
+            "command": "Restart-D365Environment -Aos", "background": True, **timeout_args})
+        assert not is_error and data["kind"] == "run"
+        is_error, done = call(s, "d365_job", {"job_id": data["job_id"], "wait_seconds": 15})
+        assert not is_error and not done["wait_expired"] and done["exit_code"] == 0
+        assert any("Password=***" in line for line in done["tail"])
+        _, retained = call(s, "d365_job")
+        assert any(job["job_id"] == data["job_id"] for job in retained["jobs"])
+    finally:
+        s._d365_close()
+
+
+def test_run_background_still_validates_the_request(fake_ps, tmp_path):
+    s = ready_server(fake_ps, tmp_path, call_budget=28.0)
+    try:
+        for args in ({"command": " "}, {"command": "Get-D365Model", "max_chars": 0}):
+            is_error, data = call(s, "d365_run", {"background": True, **args})
+            assert is_error and data["code"] == "invalid_request"
+        from mcp.server.mcpserver.exceptions import ToolError
+        with pytest.raises(ToolError, match="invalid: timeout"):
+            call(s, "d365_run", {"command": "Get-D365Model", "background": True, "timeout": "later"})
+        _, retained = call(s, "d365_job")
+        assert retained["jobs"] == []
+    finally:
+        s._d365_close()
+
+
 def test_behind_a_pond_no_call_outlasts_the_ponds_bound(fake_ps, tmp_path):
     """With call_budget (a pond section) waits, SQL and service restarts stay within it;
     without one (stdio, Copilot on loopback) the usual limits hold."""
@@ -636,8 +652,8 @@ def test_behind_a_pond_no_call_outlasts_the_ponds_bound(fake_ps, tmp_path):
         assert s._d365_session.call_seconds == 28.0
         is_error, data = call(s, "d365_job", {"job_id": "unknown", "wait_seconds": 40})
         assert is_error and "0-28" in data["message"]
-        is_error, data = call(s, "d365_environment", {"action": "restart", "services": "aos"})
-        assert is_error and "job_start" in data["message"] and "Restart-D365Environment" in data["message"]
+        is_error, data = call(s, "d365_run", {"command": "Get-D365Model", "timeout": 60})
+        assert is_error and "1-28" in data["message"] and "background=true" in data["message"]
         is_error, data = call(s, "d365_sql", {"sql": "SELECT 1", "timeout": 90})
         assert is_error and "1-28" in data["message"]
         is_error, _ = call(s, "d365_sql", {"sql": "SELECT 1"})

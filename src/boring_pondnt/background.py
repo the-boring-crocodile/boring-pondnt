@@ -6,6 +6,7 @@ none, and no stdout/stderr either, so this sends both to the log first:
 
     pythonw.exe -X utf8 -m boring_pondnt.background --log <file> boring_pondnt.server --config <file>
     pythonw.exe -X utf8 -m boring_pondnt.background --log <file> boring_pondnt.d365_server serve --config <file>
+    (likewise boring_pondnt.d365whsapp_server and boring_pondnt.d365web_server, opt-in)
 
 Child processes (exec, jobs) are started with CREATE_NO_WINDOW already
 (boring_service_kit.process), so they open no windows either.
@@ -15,7 +16,10 @@ from __future__ import annotations
 import runpy
 import sys
 
-ALLOWED = {"boring_pondnt.server", "boring_pondnt.d365_server"}  # what a task may start this way
+# What a task may start this way: every service setup runs in the person's account
+# (setup_services.SERVICES with account="user"; a test keeps the two in step).
+ALLOWED = {"boring_pondnt.server", "boring_pondnt.d365_server",
+           "boring_pondnt.d365whsapp_server", "boring_pondnt.d365web_server"}
 
 
 def main(argv: list[str] | None = None) -> None:

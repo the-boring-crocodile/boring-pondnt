@@ -15,3 +15,18 @@ def test_private_devbox_credentials(tmp_path):
         "-Helper", str(helper), "-Fixture", str(tmp_path)],
         capture_output=True, text=True, timeout=30)
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows PowerShell fixture")
+def test_devbox_callers_file(tmp_path):
+    """devbox-callers.json adds Ponds besides `pond` to every devbox service's access list (D39)."""
+    root = Path(__file__).resolve().parent.parent
+    helper = root / "tools" / "devbox-start.ps1"
+    if not helper.exists():
+        helper = root / "extras" / "pond-tunnel" / "devbox-start.ps1"
+    result = subprocess.run(["powershell.exe", "-NoProfile", "-NonInteractive",
+        "-ExecutionPolicy", "Bypass", "-File",
+        str(Path(__file__).with_name("devbox_callers_fixture.ps1")),
+        "-Helper", str(helper), "-Fixture", str(tmp_path)],
+        capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stdout + result.stderr

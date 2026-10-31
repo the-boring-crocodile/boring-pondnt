@@ -49,9 +49,12 @@ Keep credentials out of output and notes. Redaction is a limited backstop,
 not permission to run commands that print secrets. If a secret appears,
 do not repeat it; tell the owner so they can assess rotation.
 
-Project state belongs in approved private project records. Shared notebooks
-receive only appropriate sanitized lessons, with audience and access checked.
-Future sessions can read saved context; agree what should persist.
+Keep one current-state entry point in approved private project records. At a
+handoff, put the goal, branch/candidate, pending changes, retained jobs, verdict
+and next action at the top; link detailed evidence and separate parked work.
+Update superseded conclusions there instead of appending competing summaries.
+Shared notebooks receive sanitized reusable lessons, with audience/access
+checked, not another task diary.
 
 ## Closing inventory
 

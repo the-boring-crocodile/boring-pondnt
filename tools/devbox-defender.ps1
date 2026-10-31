@@ -42,17 +42,23 @@ param(
     [switch]$Undo,
     [switch]${D365-All},
     [switch]$NoProcesses,
-    [string]$Record = (Join-Path $PSScriptRoot 'devbox-defender-record.json')
+    # The receipt that -Undo reads. Default: outside the release folder, so it survives an update.
+    [string]$Record = ''
 )
 
 $ErrorActionPreference = 'Stop'
+# $PSScriptRoot can be empty while parameter defaults are evaluated (Windows PowerShell 5.1,
+# seen on the Azure box 2026-10-26: 'Join-Path ... empty string'); resolve paths here instead.
+$here = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
+if (-not $Record) { $Record = Join-Path $env:ProgramData 'boring-pondnt\devbox-defender-record.json' }
+$recordDir = Split-Path -Parent $Record; if (-not (Test-Path $recordDir)) { New-Item -ItemType Directory -Force $recordDir | Out-Null }
 
 function Test-Admin {
     ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
         [Security.Principal.WindowsBuiltInRole]::Administrator)
 }
 
-. (Join-Path $PSScriptRoot 'maintenance-state.ps1')
+. (Join-Path $here 'maintenance-state.ps1')
 
 function Read-DefenderRecord([string]$Path) {
     $data = Read-MaintenanceRecord $Path 'pondnt-defender'
@@ -136,8 +142,8 @@ if ($Undo) {
 }
 
 # --- state of Defender --------------------------------------------------------
-$status = Get-MpComputerStatus
-$pref = Get-MpPreference
+try { $status = Get-MpComputerStatus; $pref = Get-MpPreference }
+catch { "Microsoft Defender is not available on this machine ($($_.Exception.Message.Trim())): nothing to exclude."; return }
 "Defender: real-time protection $($status.RealTimeProtectionEnabled), mode $($status.AMRunningMode), " +
 "tamper protection $($status.IsTamperProtected)"
 if ($status.IsTamperProtected) {

@@ -1,49 +1,4 @@
 {
-  "d365_status": {
-    "name": "d365_status",
-    "description": "This environment: services and their state, URL, installed versions, elevation, d365fo.tools.",
-    "input_schema": {
-      "additionalProperties": false,
-      "properties": {},
-      "type": "object"
-    },
-    "annotations": {
-      "read_only_hint": true,
-      "destructive_hint": false,
-      "idempotent_hint": true,
-      "open_world_hint": false
-    }
-  },
-  "d365_models": {
-    "name": "d365_models",
-    "description": "Models on this box, live: name, module, layer. name: wildcard pattern.",
-    "input_schema": {
-      "additionalProperties": false,
-      "properties": {
-        "name": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "exclude_microsoft": {
-          "default": false,
-          "type": "boolean"
-        },
-        "customizable_only": {
-          "default": false,
-          "type": "boolean"
-        }
-      },
-      "type": "object"
-    },
-    "annotations": {
-      "read_only_hint": true,
-      "destructive_hint": false,
-      "idempotent_hint": true,
-      "open_world_hint": false
-    }
-  },
   "d365_build": {
     "name": "d365_build",
     "description": "Build a package (X++ compile and labels) as a job; dry_run shows the command only.",
@@ -173,22 +128,30 @@
       "open_world_hint": true
     }
   },
-  "d365_environment": {
-    "name": "d365_environment",
-    "description": "start | stop | restart services (all, aos, batch, financialreporter, dmf, documentrouting).",
+  "d365_run": {
+    "name": "d365_run",
+    "description": "Run d365fo.tools; timeout bounds foreground only (default up to 60 s); background returns a job. Credentials masked.",
     "input_schema": {
       "additionalProperties": false,
       "properties": {
-        "action": {
+        "command": {
           "type": "string"
         },
-        "services": {
-          "default": "all",
-          "type": "string"
+        "timeout": {
+          "default": 60,
+          "type": "integer"
+        },
+        "background": {
+          "default": false,
+          "type": "boolean"
+        },
+        "max_chars": {
+          "default": 20000,
+          "type": "integer"
         }
       },
       "required": [
-        "action"
+        "command"
       ],
       "type": "object"
     },
@@ -196,12 +159,12 @@
       "read_only_hint": false,
       "destructive_hint": true,
       "idempotent_hint": false,
-      "open_world_hint": false
+      "open_world_hint": true
     }
   },
   "d365_job": {
     "name": "d365_job",
-    "description": "A job's state and last output lines (stop=true ends it); without job_id: this session's jobs.",
+    "description": "Job state/tail; wait_seconds 0-60 observes, stop=true requests termination. No id: list. Stop may change state.",
     "input_schema": {
       "additionalProperties": false,
       "properties": {
@@ -218,14 +181,18 @@
         "stop": {
           "default": false,
           "type": "boolean"
+        },
+        "wait_seconds": {
+          "default": 0,
+          "type": "number"
         }
       },
       "type": "object"
     },
     "annotations": {
-      "read_only_hint": true,
-      "destructive_hint": false,
-      "idempotent_hint": true,
+      "read_only_hint": false,
+      "destructive_hint": true,
+      "idempotent_hint": false,
       "open_world_hint": false
     }
   },
@@ -267,29 +234,26 @@
       "open_world_hint": false
     }
   },
-  "xref_info": {
-    "name": "xref_info",
-    "description": "The database: version, providers, counts of names and references, the reference kinds.",
-    "input_schema": {
-      "additionalProperties": false,
-      "properties": {},
-      "type": "object"
-    },
-    "annotations": {
-      "read_only_hint": true,
-      "destructive_hint": false,
-      "idempotent_hint": true,
-      "open_world_hint": false
-    }
-  },
-  "xref_names": {
-    "name": "xref_names",
-    "description": "Paths for an element name or label ID (CustTable, @SYS1), or below a prefix (/Classes/Sales*).",
+  "xref": {
+    "name": "xref",
+    "description": "Compiled references: what=info | names (name) | references (path; direction used_by|uses) | hierarchy (name; down|up).",
     "input_schema": {
       "additionalProperties": false,
       "properties": {
-        "name": {
+        "what": {
           "type": "string"
+        },
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "path": {
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "element_type": {
           "type": [
@@ -297,35 +261,11 @@
             "null"
           ]
         },
-        "limit": {
-          "default": 50,
-          "type": "integer"
-        }
-      },
-      "required": [
-        "name"
-      ],
-      "type": "object"
-    },
-    "annotations": {
-      "read_only_hint": true,
-      "destructive_hint": false,
-      "idempotent_hint": true,
-      "open_world_hint": false
-    }
-  },
-  "xref_references": {
-    "name": "xref_references",
-    "description": "used_by|uses of a path or label: totals by kind and module (package, not model), then rows. members: its children too.",
-    "input_schema": {
-      "additionalProperties": false,
-      "properties": {
-        "path": {
-          "type": "string"
-        },
         "direction": {
-          "default": "used_by",
-          "type": "string"
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "kind": {
           "type": [
@@ -344,8 +284,10 @@
           "type": "boolean"
         },
         "limit": {
-          "default": 50,
-          "type": "integer"
+          "type": [
+            "integer",
+            "null"
+          ]
         },
         "offset": {
           "default": 0,
@@ -353,37 +295,7 @@
         }
       },
       "required": [
-        "path"
-      ],
-      "type": "object"
-    },
-    "annotations": {
-      "read_only_hint": true,
-      "destructive_hint": false,
-      "idempotent_hint": true,
-      "open_world_hint": false
-    }
-  },
-  "xref_hierarchy": {
-    "name": "xref_hierarchy",
-    "description": "down: all classes extending (or implementing) a class or interface; up: its bases and interfaces.",
-    "input_schema": {
-      "additionalProperties": false,
-      "properties": {
-        "name": {
-          "type": "string"
-        },
-        "direction": {
-          "default": "down",
-          "type": "string"
-        },
-        "limit": {
-          "default": 100,
-          "type": "integer"
-        }
-      },
-      "required": [
-        "name"
+        "what"
       ],
       "type": "object"
     },

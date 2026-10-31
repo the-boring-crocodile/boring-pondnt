@@ -1,0 +1,5 @@
+HTTP 500 {
+  "Message": "An exception occured when invoking the operation - The request contains invalid session token. Please log in again to continue working on this device. Warehouse Mobile Devices session token protocol violated. REQUEST_SESSION_TOKEN_ERROR",
+  "ExceptionType": "ErrorException",
+  "ActivityId": "scrubbed"
+}

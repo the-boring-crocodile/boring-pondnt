@@ -71,21 +71,21 @@ def long_paths_enabled() -> bool | None:
 def bootstrap_result(kit: Path | None) -> dict[str, Any]:
     result: dict[str, Any] = {"server": "boring-pondnt-core", "version": __version__}
     if kit is None:
-        result["kit"] = None
-        result["note"] = "no kit configured (--kit); working without the shared agreement"
+        result["handbook"] = None
+        result["note"] = "no handbook configured (--handbook); working without the shared agreement"
     else:
         start = kit / "bootstrap.md"
         try:
             result["bootstrap"] = start.read_text(encoding="utf-8-sig")
         except OSError as exc:
             result["bootstrap"] = None
-            result["note"] = f"kit bootstrap not readable: {exc}"
-        result["kit"] = str(kit)
-        result["kit_files"] = sorted(str(p) for p in kit.rglob("*.md") if p != start)
+            result["note"] = f"handbook bootstrap not readable: {exc}"
+        result["handbook"] = str(kit)
+        result["handbook_files"] = sorted(str(p) for p in kit.rglob("*.md") if p != start)
         shipped = default_kit()
         if shipped is not None and shipped.resolve() != kit.resolve():
             # The served kit is the owner's; the release's own kit is only a proposal.
-            result["release_kit"] = str(shipped)
+            result["release_handbook"] = str(shipped)
     checks: dict[str, Any] = {}
     if sys.platform == "win32":
         checks["default_shell"] = execs.default_shell()
@@ -103,8 +103,8 @@ def bootstrap_result(kit: Path | None) -> dict[str, Any]:
 
 
 def default_kit() -> Path | None:
-    """The kit shipped in the release folder (`<release>/kit`), if any."""
-    bundled = Path(sys.prefix).parent / "kit"
+    """The kit shipped in the release folder (`<release>/handbook`), if any."""
+    bundled = Path(sys.prefix).parent / "handbook"
     return bundled if (bundled / "bootstrap.md").is_file() else None
 
 
@@ -314,7 +314,8 @@ def run_batch(mcp: MCPServer, plain: dict[str, Callable[..., dict[str, Any]]],
             raise Refused("invalid_request", "each step needs a unique, nonempty string id", step=index)
         seen.add(step_id)
         if not isinstance(method, str) or method not in plain or method in NOT_IN_BATCH:
-            if isinstance(method, str) and method.replace("-", "_").startswith(("d365_", "xref_")):
+            if isinstance(method, str) and (method.replace("-", "_").startswith(("d365_", "xref_"))
+                                            or method == "xref"):
                 # Seen on a dev VM: Copilot put "xref-names" into a core batch.
                 raise Refused("invalid_request", f"{method} is a tool of the d365 server, not of this one: "
                               "call it directly; batch takes only this server's methods", step=step_id)
@@ -391,7 +392,7 @@ def main(argv: list[str] | None = None) -> None:
     import argparse  # noqa: PLC0415
 
     parser = argparse.ArgumentParser(prog="boring-pondnt-core", description=INSTRUCTIONS)
-    parser.add_argument("--kit", type=Path, help="kit folder with bootstrap.md (default: <release>/kit)")
+    parser.add_argument("--handbook", dest="kit", type=Path, help="handbook folder with bootstrap.md")
     parser.add_argument("--state-dir", type=Path, help=f"job output, call log (default {default_state_dir('boring-pondnt')})")
     parser.add_argument("--no-call-log", action="store_true", help="do not write calls.jsonl")
     parser.add_argument("--self-check", action="store_true", help="check this machine, print JSON, exit")

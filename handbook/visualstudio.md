@@ -25,9 +25,14 @@ scope. External build/sync tools are not substitutes for this VS workflow.
 
 ## Establish what the IDE owns
 
-Find the actual workspace, source root, model/package mapping and source-control
-state before changing anything. The workspace can be nested inside the
-repository; a package directory can link to repository metadata. Discover the
+Record the VS, Copilot and pondNT versions and inspect this session's native
+tool schemas. The path/edit examples below were observed in VS 2022; they are
+starting points, not established VS 2026 behavior. An installed extension's
+manifest version does not independently prove which version the IDE loaded.
+
+Find the actual workspace, branch, source root, model/package mapping and
+source-control state before changing anything. The workspace can be nested
+inside the repository; a package directory can link to repository metadata. Discover the
 configured service drive rather than assuming a drive letter.
 
 Inspect pending changes using the available VS/source-control tooling. A clean
@@ -35,8 +40,9 @@ Git diff is not proof that an untracked or ignored model is unchanged.
 Preserve an approved baseline outside model folders when needed, and compare
 before/after. Do not reset, add or remap files merely to make evidence easier.
 
-The open-files list is a clue to the current discussion, not complete project
-state or evidence that its buffers are saved.
+An empty project list or wildcard search does not prove files are absent.
+Check the current branch and a literal path through an authorized read route.
+The open-files list does not establish project completeness or saved buffers.
 
 ## Edit and verify
 
@@ -45,15 +51,22 @@ Inspect this session's tool list. Known VS/Copilot names include `get_file`,
 some sessions expose `edit_file` or `apply_patch`. Use the IDE-owned tool,
 not an external namesake.
 
-Edit your own elements through the path the solution's project uses: the
-source repository, usually given relative to the solution. A search can return
-the same file under the package directory
-(`<drive>:\AosService\PackagesLocalDirectory\...`), often a link into the
-repository, and the edit tools do not always resolve that path. If an edit
-tool reports FileNotFound for a file you have just read, retry once with the
-solution-relative source path, or with `edit_file` instead of `apply_patch`.
-Never reconstruct a path from memory. Path handling differs between VS
-versions: note the form that worked.
+Readers and editors can resolve the same linked model differently. Establish
+the package-to-repository mapping; do not guess paths or treat aliases as copies.
+This combination worked in a VS 2022 linked-model workspace:
+
+| Operation | Native tool | Path form |
+| --- | --- | --- |
+| Read before/after | `get_file` | `<drive>:\AosService\PackagesLocalDirectory\<package>\<model>\AxClass\<name>.xml` |
+| Edit existing source | `apply_patch` or `edit_file` | `..\<source-repo>\Metadata\<package>\<model>\AxClass\<name>.xml`, relative to the solution |
+
+Package-path patches failed with FileNotFound while reads succeeded; the
+repository-relative reader also failed while editors succeeded. If this occurs,
+retry the same native editor once with the verified solution-relative path.
+If needed, try another available native editor separately. Read back through
+the proven reader path to verify the active model changed. Record the working
+path per tool in project context. Restarting VS did not repair that path failure.
+These observations establish existing-file edits, not new-element creation.
 
 Read current content. For replacement tools, use unique full-line
 `oldString`/`newString` spans with enough context. Group compatible edits to
@@ -81,19 +94,15 @@ Arrange one coherent verification for the change; do not build after each
 keystroke or compete with a build already running. Model, package and solution
 are distinct scopes. Identify which one the build actually covered.
 
-Use the VS/Copilot build and diagnostic route. If the owner builds, record the
-result as reported, with scope/time and relevant diagnostics. If a read-only
-pondNT diagnostic inspection is appropriate, d365_results may find compatible
-package logs from a VS build. Absence of such a log proves no build verdict.
+Use the VS/Copilot build and diagnostic route. Record owner-run results as
+reported, with scope/time and diagnostics. Match logs to the intended candidate
+and completed build; runtime success does not prove the build checks passed.
+For authorized read-only `d365_results` inspection and its limits, see
+[tools.md](tools.md#d365-operations-and-evidence).
 
-A log's path and timestamp must match the intended build. Latest available is
-not necessarily current, complete or tied to the edited source. Runtime
-execution adds evidence; it does not retrospectively prove all build checks.
-
-Schema changes require the appropriate successful build and synchronization
-before dependent tests. Use the approved VS workflow; a missing capability
-needs an owner handoff. Distinguish build success, sync success and functional
-acceptance. Record remaining gaps.
+Schema changes need a successful build and sync before dependent tests.
+Keep build, sync and functional verdicts separate; name missing capabilities
+and remaining checks in the owner handoff.
 
 ## IDE recovery
 
@@ -102,11 +111,11 @@ unsaved state, disconnected server or an unexpected editor error.
 Read the path exposed by the IDE tool. Verify an alternative path remains
 inside the authorized workspace; never use aliases to defeat a restriction.
 
-After an unexpected text-view/session failure, save the handoff and ask the
-owner to save work and restart VS, then retry the IDE tool. Do not restart
-over unsaved work or a running build. For missing tools, inspect the session's
-actual tool list and GitHub Copilot Output diagnostics before inferring absence
-from a picker alone. A connection icon is not a successful tool call.
+For an unexpected text-view/session failure, inspect Copilot Output diagnostics
+and try one harmless native read. If a restart is warranted, save the handoff
+and coordinate it with the owner; never interrupt unsaved work or a build.
+A restart is not a generic path fix. For missing tools, inspect the actual tool
+list rather than a picker alone. A connection icon is not a successful call.
 
 Keep settings, trust, exclusions and permissions unchanged unless explicitly
 authorized. Stop repeating an identical failing route without new evidence.
