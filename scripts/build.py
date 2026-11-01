@@ -13,6 +13,7 @@ Layout of `boring-pondnt-<version>-win-x64/`:
     LICENSE, COPYING.md  our licence (AGPL-3.0-or-later; the output of the tools is yours)
     setup.ps1          looks, shows the plan, sets up .mcp.json and the index on "yes" (tools/setup.ps1)
     devbox-defender.ps1  Defender exclusions for the D365 box: report, -Apply, -Undo (tools/devbox-defender.ps1)
+    browser-signin.cmd   signs in d365web's / d365whsapp's Edge profile, writes its config (tools/browser-signin.ps1)
     extras/pond-tunnel/  optional: the Pond tunnel we test with (docs/DEVBOX_TUNNEL.md, tools/)
     handbook/          the working agreement (`bootstrap` serves it)
     boring-pondnt-core.cmd    launcher: boring-pondnt-core.cmd [--self-check] ...
@@ -75,6 +76,8 @@ pythonpath = tests
 markers =
     windows: needs real Windows (process trees, console encoding, locks)
 """
+
+WHEEL_EPOCH = 315532800  # 1980-01-01, the earliest time a zip (and so a wheel) can record
 
 
 def sha256(path: Path) -> str:
@@ -219,8 +222,11 @@ def build(with_tests: bool, out: Path, services_root: Path, common_wheels: Path,
                                    ("boring-canvas", services_root, "canvas"),
                                    ("boring-mcp-ferry", services_root, "mcp-ferry")):  # the optional gateway (D41)
             source = develop.package(root, Path(scratch) / package, sub)
+            # A fixed SOURCE_DATE_EPOCH, like Common's build: the wheels then depend on their
+            # contents, not on when the files were copied (two builds used to differ there).
             develop.run(develop.uv(), "build", "--build-constraint", services_root / "scripts/build-constraints.txt",
-                        "--wheel", "--out-dir", wheel_dir, source)
+                        "--wheel", "--out-dir", wheel_dir, source,
+                        env=dict(os.environ, SOURCE_DATE_EPOCH=str(WHEEL_EPOCH)))
     (wheel,) = wheel_dir.glob("boring_pondnt-*.whl")
     (registry,) = wheel_dir.glob("boring_registry-*.whl")
     (kit,) = wheel_dir.glob("boring_service_kit-*.whl")
@@ -251,7 +257,7 @@ def build(with_tests: bool, out: Path, services_root: Path, common_wheels: Path,
     for tool in ("devbox-start.ps1", "maintenance-state.ps1", "tunnel-account.sh",
                  "devbox-teardown.sh", "tunnel_host.py"):
         shutil.copyfile(REPO / "tools" / tool, extras / tool)
-    for script in ("setup.ps1", "devbox-defender.ps1", "maintenance-state.ps1"):
+    for script in ("setup.ps1", "devbox-defender.ps1", "maintenance-state.ps1", "browser-signin.ps1"):
         (stage / script).write_bytes((REPO / "tools" / script).read_bytes().replace(b"\r\n", b"\n")
                                      .replace(b"\n", b"\r\n"))
     (stage / "INSTALL.md").write_bytes((REPO / "docs" / "INSTALL.md").read_bytes().replace(b"\r\n", b"\n")
@@ -262,6 +268,9 @@ def build(with_tests: bool, out: Path, services_root: Path, common_wheels: Path,
     shutil.copyfile(services_root / "docs/CONFIGURATION.md", stage / "SERVICES_CONFIGURATION.md")
     # PYTHONUTF8=1: Python's own stdio in UTF-8 even when redirected (Windows would use the
     # ANSI code page, and the self-check would crash on that).
+    # Double-click on the desktop, as yourself; the window stays open to show the result.
+    (stage / "browser-signin.cmd").write_text(
+        '@echo off\r\npowershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0browser-signin.ps1" %*\r\npause\r\n')
     (stage / "boring-pondnt-core.cmd").write_text(
         '@echo off\r\nset PYTHONUTF8=1\r\n"%~dp0python\\python.exe" -m boring_pondnt.server %*\r\n')
     (stage / "boring-pondnt-d365.cmd").write_text(

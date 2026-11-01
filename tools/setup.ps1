@@ -9,7 +9,8 @@
         .\setup.ps1              look, show the plan, ask before each change
         .\setup.ps1 -WhatIf      look and show the plan only; changes nothing
         .\setup.ps1 -Yes         apply the plan without asking (never touches Defender without -AddDefenderExclusion)
-        .\setup.ps1 -Uninstall   remove pondNT's entries from .mcp.json; list what else to remove
+        .\setup.ps1 -Uninstall   stop and remove pondNT's scheduled tasks and its .mcp.json entries (asks first;
+                                 data folders stay); offer to remove the Defender exclusions; list what else to remove
         .\setup.ps1 -Gateway all put the services (not the core, not Knowledge) behind one entry, boring-gateway
 
     What it may change, each only after you agree:
@@ -30,6 +31,10 @@
       - Defender: when it scans pondNT's python, setup ASKS (default no) whether to exclude this release's
         python.exe and pythonw.exe; -AddDefenderExclusion plans it. -Yes alone never does it. That is
         dangerous -- read INSTALL.md, step 2. -Uninstall offers to remove those exclusions again.
+      - the release folder's permissions: its python runs as SYSTEM and elevated, so only administrators
+        and SYSTEM may change or add files there (Users read and run). An unpacked zip inherits its
+        parent's permissions, and C:\ lets every user add files to new folders; setup takes this folder
+        off inheritance once and checks every file below it (nothing else on the machine).
     It never installs d365fo.tools, never changes Windows services, PATH or the registry.
 #>
 [CmdletBinding()]
@@ -75,6 +80,37 @@ function Ask($question) {
     if ($WhatIf) { return $false }
     if ($Yes) { return $true }
     return (Read-Host "$question [y/N]") -match '^(y|yes|j|ja)$'
+}
+# The release folder runs as SYSTEM (services) and elevated (core, D365): whoever may add a
+# file under it (a sitecustomize.py, a .pth) runs code there. Trusted to change it:
+# Administrators, SYSTEM, TrustedInstaller. Anything else that may write, append, delete or
+# change permissions is reported; inherited entries below the root are judged at the root.
+$trustedSids = @('S-1-5-32-544', 'S-1-5-18', 'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464')
+$writeMask = [long](0x2 -bor 0x4 -bor 0x10 -bor 0x100 -bor 0x10000 -bor 0x40 -bor 0x40000 -bor 0x80000 -bor 0x10000000 -bor 0x40000000)
+function Release-OpenWrites {
+    $items = @(Get-Item -LiteralPath $root -Force) + @(Get-ChildItem -LiteralPath $root -Recurse -Force -ErrorAction Stop)
+    foreach ($i in $items) {
+        $rules = (Get-Acl -LiteralPath $i.FullName).GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier])
+        foreach ($r in $rules) {
+            if ($r.AccessControlType -ne 'Allow') { continue }
+            if ($i.FullName -ne $root -and $r.IsInherited) { continue }
+            if ($trustedSids -contains $r.IdentityReference.Value) { continue }
+            if (([long]$r.FileSystemRights) -band $writeMask) {
+                "$($i.FullName): $($r.IdentityReference.Value) $($r.FileSystemRights)"
+            }
+        }
+    }
+}
+function Lock-ReleaseFolder {
+    # Off inheritance; Administrators and SYSTEM full, Users read and run; the files below inherit it.
+    $out = & icacls.exe $root /inheritance:r /grant:r '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-545:(OI)(CI)RX' /Q 2>&1
+    if ($LASTEXITCODE) { throw "icacls could not set the release folder's permissions: $out" }
+    $left = @(Release-OpenWrites)
+    if ($left) {
+        $left | Select-Object -First 10 | ForEach-Object { Say "    still open: $_" Red }
+        throw "entries setup did not set still let others change the release folder; remove them (icacls PATH /remove:g SID) and run setup again"
+    }
+    Say "  release folder: only administrators and SYSTEM may change it now" Green
 }
 function Read-McpJson {
     $script:McpReadSha = $null
@@ -560,6 +596,14 @@ if (-not $SkipServices) {
         }
     }
 }
+$openWrites = @()
+if (-not $SkipServices) {
+    $openWrites = @(Release-OpenWrites)
+    if ($openWrites) {
+        $plan += "release folder permissions: only administrators and SYSTEM may change it (its python runs as SYSTEM and elevated; now $($openWrites.Count) entries let others add or change files)"
+        $openWrites | Select-Object -First 5 | ForEach-Object { Say "    open: $_" Yellow }
+    }
+}
 $scanned = $defender -and $defender.detail -match 'scans'
 if ($WhatIf) {
     # The preview skips the probes, Defender's included: say what applying will check.
@@ -594,6 +638,14 @@ if ($plan -match 'build the source index') {
     if (Ask "Build the source index now (10-35 min with the Defender exclusion, depending on the disk, many times longer without it; this window stays busy)?") {
         & (Join-Path $root 'boring-sourcecache-d365.cmd') build --source $Source --db $Index --name $Name --locales $Locales
         if ($LASTEXITCODE) { throw 'Source index build failed; no service configuration was changed.' }
+    }
+}
+if ($openWrites) {
+    if (Ask "Allow only administrators and SYSTEM to change this release folder (its python runs as SYSTEM and elevated)?") {
+        Lock-ReleaseFolder
+    } elseif ($svcPlan -and $svcPlan.services) {
+        Say "  Services not set up: they would run as SYSTEM and elevated from a folder others may add files to." Yellow
+        $svcPlan = $null
     }
 }
 $write = $false

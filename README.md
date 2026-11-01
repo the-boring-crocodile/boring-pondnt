@@ -29,20 +29,23 @@ It shows how browser and warehouse tools fit into a development-and-test loop.
 
 **What it costs:**
 
+- a dev box you can afford to lose: the agent may break it, so only a
+  disposable one, with no live data, no data you cannot afford to lose and
+  no connection to production;
 - local administrator rights, and an install whose source index takes 10-35
   minutes with the Defender exclusion, depending on the disk; many times
   longer without it;
 - Copilot's commands run elevated, as you;
 - the D365 server holds a writer key: Copilot can change AxDB, build, sync
-  and restart the environment;
+  and restart the environment ([who can do what](docs/THREAT_MODEL.md));
 - optionally, a Defender exclusion for pondNT's python, which opens a hole
   in the box's protection ([what it means](docs/INSTALL.md#2-defender-optional----dangerous-read-first)).
 
 **Why:** Copilot in Visual Studio spends many slow calls and many tokens on
 work that a few bounded, well-designed tools answer at once. Working in the
 Pond showed the difference. The aim is fewer and smaller Copilot calls, so
-better models become affordable for ordinary work. That is a hypothesis
-until measured, and we say so rather than guess.
+better models become affordable for ordinary work. That is still a
+hypothesis: it has not been measured in a way worth publishing.
 
 The handbook can also give Copilot a voice (`handbook/persona.md`); "Plain, please"
 switches it off for the session.
@@ -52,6 +55,11 @@ Install: [docs/INSTALL.md](docs/INSTALL.md). **Recommended: use Ferry with
 the other selected services are discovered and called through the gateway.
 
 ## What runs on the box
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/pondnt-dark.svg">
+  <img alt="pondNT on a disposable D365 dev box: Copilot in Visual Studio has three MCP entries, core (files, commands and long jobs, running as you, elevated), Knowledge (the agent's notebook, as SYSTEM) and Ferry (a gateway as SYSTEM with four tools for the rest). Through Ferry: the D365 server (build, sync, SQL, xref, as you, elevated; it answers to a writer key, which Ferry holds), Sourcecache and Canvas (as SYSTEM), and the opt-in browser and warehouse servers (as you, elevated) that work D365 forms and warehouse screens over HTTPS. The D365 server and the browser servers act on the D365 environment: AOS, AxDB and source." src="docs/pondnt.svg">
+</picture>
 
 The recommended layout gives Copilot three MCP entries: core, Knowledge
 and Ferry. Core keeps the workspace tools at hand; Knowledge keeps the
@@ -83,6 +91,10 @@ installation created by `setup.ps1`**:
 | Sourcecache | 18501 | D365 source, elements, labels | SYSTEM | at boot |
 | Knowledge | 18512 | Notes the agents keep | SYSTEM | at boot |
 | Canvas | 18511 (web page 18510) | Shared drawings | SYSTEM | at boot |
+
+These are this box's ports. On a Linux site the same services use their own
+(Sourcecache 18513 there, where 18513 is the core here): the
+[services README](https://github.com/the-boring-crocodile/boring-services/blob/main/README.md#before-the-first-install).
 
 With an operator-maintained manual launcher instead, the servers run under
 the account that launches them and start when that launcher is run. An elevated
@@ -132,9 +144,11 @@ Bounded results, version-hashed edits, jobs, batch, outcomes as data and a
 bootstrap handoff are proven in the Boring Crocodile MCP; the source index
 is proven on the VM. The new work is Windows and Copilot.
 
-D365 development happens on dev VMs, so that is where pondNT is tested:
-every release's full suite (`ci/guest-run.ps1`) in a disposable Windows
-guest, then daily work on a real Azure D365 dev VM. Hosted CI runs the
+D365 development happens on dev VMs, so that is where pondNT is tested: a
+release's full suite runs natively on a local D365 dev VM before it is
+published, and the release page carries that run's summary. Daily work on an
+Azure D365 dev VM comes after a release and is reported, not acceptance;
+[EVIDENCE](docs/EVIDENCE.md) says which release got what. Hosted CI runs the
 portable tests on Linux; a hosted Windows runner has no D365, so it could
 add only the generic Windows tests. Pieces that prove better than the
 Pond's own flow back into the family.
@@ -146,6 +160,9 @@ Pond's own flow back into the family.
 - [docs/FOUNDATION_SPEC.md](docs/FOUNDATION_SPEC.md) -- the core's contract
 - [docs/D365_SERVICE.md](docs/D365_SERVICE.md), [docs/XREF_SERVICE.md](docs/XREF_SERVICE.md) -- the D365 server and its xref tools
 - [docs/VISUAL_STUDIO_COPILOT.md](docs/VISUAL_STUDIO_COPILOT.md) -- Copilot in Visual Studio, learned the hard way
+- [docs/EVIDENCE.md](docs/EVIDENCE.md) -- what has been tested where, and what has not
+- [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) -- who can do what on the box, what pondNT enforces and what it cannot
+- [docs/CLIENTS.md](docs/CLIENTS.md) -- VS Code, Claude Code and Claude Desktop on the same box (untested recipes)
 - [docs/DEVBOX_TUNNEL.md](docs/DEVBOX_TUNNEL.md) -- optional Pond tunnel and dev box helpers
 - [CHANGELOG.md](CHANGELOG.md) -- what changed
 

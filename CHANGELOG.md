@@ -3,6 +3,44 @@
 Notable changes per release, newest first ([Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 [SemVer](https://semver.org/); tags `vX.Y.Z`, candidates `vX.Y.Z-rc.N`).
 
+## 0.2.9 — 2026-11-01
+
+Same Pond Common (0.7.11) and bundled services as 0.2.8.
+
+Security:
+
+- **setup.ps1 locks down its own release folder.** The folder's Python runs as SYSTEM and
+  elevated, but a folder unpacked under `C:\` lets every user add files to it, enough to run
+  code as SYSTEM. setup now takes exactly that folder off inheritance, asking first unless
+  `-Yes` (administrators and SYSTEM change it, Users read and run it), checks every file below
+  it, and starts no service while anything else may write there. Existing installs get it at their next setup
+  run. INSTALL.md shows the same as one `icacls` line.
+
+Added:
+
+- **`browser-signin.cmd`** in the release folder signs in the Edge profile that d365web, or
+  d365whsapp in form mode, drives. Double-click it as yourself: it suggests the AOS address
+  from the box's `web.config` (`Infrastructure.HostUrl`), asks for the company, writes the
+  service's configuration file when there is none (an existing one is used and never
+  overwritten), refuses while the service's browser holds the profile's port, and opens Edge.
+  App mode (client secret) is left alone.
+
+Docs:
+
+- New: [what has been tested where](docs/EVIDENCE.md), [who can do what on the box](docs/THREAT_MODEL.md)
+  (including the two loopback doors without a key: Canvas's page and d365web's debugging port),
+  [other clients on the same box](docs/CLIENTS.md) (untested recipes), [update, and back](docs/INSTALL.md#10-update-and-back), and
+  [the browser from nothing to the first check](docs/D365WEB.md#from-nothing-to-the-first-check-in-one-go).
+- INSTALL lists every server, checks long paths, and explains the folder permissions; the call log's
+  description matches the code (no argument text at all; rotation is a size rule, not retention).
+
+Fixed:
+
+- The bundled wheels are reproducible (a fixed SOURCE_DATE_EPOCH, like Pond Common's build).
+- The package no longer describes itself as a stdio server; every server speaks HTTP.
+- `setup.ps1 -?` describes `-Uninstall` completely (it also stops and removes pondNT's own
+  scheduled tasks); the CI guest script no longer claims the installer enables long paths.
+
 ## 0.2.8 — 2026-10-30
 
 The first stable release after 0.2.0rc23; everything since. Built on Pond Common 0.7.11 and

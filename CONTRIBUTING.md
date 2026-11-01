@@ -17,6 +17,11 @@ want public.
   `DIST` is a directory with the wheels of the Common release named in
   `.common-ref` ([how to get them](https://github.com/the-boring-crocodile/boring-pond-common/blob/main/README.md#consumers)).
   `../boring-services` is a checkout of the latest boring-services release.
+- Licences (`reuse lint`) and links between the docs, anchors included, are
+  checked once for the whole family, by boring-pond's check
+  (`scripts/check_licences.py`, `scripts/check_docs.py`, run by its CI and
+  before every release), not a second time here. Generic Windows CI would
+  add portable coverage; it is no evidence about a D365 box.
 - Contributions come in under the project's licences (COPYING.md): code under
   the GNU AGPL 3.0 or later, documentation under CC BY-SA 4.0, the files
   COPYING.md marks public domain under CC0.

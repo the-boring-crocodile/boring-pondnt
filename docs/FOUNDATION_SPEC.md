@@ -156,11 +156,33 @@ result_limit`: every result is re-sent on every later turn. No rollback.
 
 `calls.jsonl` in the state directory, one JSON line per call: `ts`, `tool`,
 `outcome` (`succeeded`, `refused`, `failed`, `error`), `code`, `ms`,
-`result_bytes`, `args` summarised (`content`, `data`, `old_text`,
-`new_text` as `{"chars": n}`; strings over 200 characters as
-`{"start", "chars"}`; `edits` as a count; batch `operations` as the list of
-methods). Rotated to `calls.1.jsonl` at 10 MB. On by default; `--no-call-log`
-switches it off. Writing it never breaks a tool.
+`result_bytes` and `args`. It measures what the agent does (calls per task,
+bytes per result) and records what ran on an elevated machine, without
+keeping what was said: no argument text is stored, not even the start of a
+command or a SQL statement.
+
+- **What `args` keeps:** only a reviewed list of field names (`command`,
+  `sql`, `path`, `content`, `edits`, `timeout_seconds`, ...). A string
+  becomes `{"chars": n}`, a list `{"items": n}` (`{"edits": n}` for edits), a
+  nested object `{"fields": n}`; numeric budgets (`timeout_seconds`, `limit`,
+  `line_count`, ...) are kept as numbers. Any other field is only counted
+  (`other_fields`), so names a caller invents are not kept either. The code
+  is Pond Common's `boring_service_kit.calllog`.
+- **Who can read it:** whoever can read the state directory, by default the
+  installing person's `%LOCALAPPDATA%\boring-pondnt` for the core (its
+  default state directory; `--state-dir` moves it), and administrators.
+- **How much stays:** the file is renamed to `calls.1.jsonl` once it passes
+  10 MiB, replacing the previous one; so at most two files, about 20 MiB.
+  That is a size rule, not a retention period, and not a hard cap: if the
+  rename fails (the old file open on Windows), writing goes on in the same
+  file.
+- On by default; `--no-call-log` switches it off. Writing it never breaks a
+  tool.
+
+The call log is not the only record. Job output (`job_output`), the D365
+servers' own logs and step logs (D365WEB.md, D365WHSAPP.md) and each
+service's `service.log` hold what those tools produced, which can include
+data from the box; they follow their own pages' notes.
 
 ## Self-check
 
@@ -179,8 +201,9 @@ bytes otherwise unchanged; a job started, waited for and read; long paths
   job; the server's exit closes it.
 - **Encodings and newlines:** UTF-8 with and without BOM, UTF-16 LE/BE, CRLF,
   LF, mixed; round trips compare bytes.
-- **Paths:** `LongPathsEnabled` is a prerequisite, checked by
-  `bootstrap`.
+- **Paths:** `LongPathsEnabled` is a prerequisite: `bootstrap` warns and
+  `--self-check` fails while it is off; nothing of pondNT sets it (an
+  administrator enables it once).
 - **Locks:** sharing violations are `locked` (refused on read, failed on
   write), not a retry loop.
 - **Launch:** started by absolute path from a versioned release folder;

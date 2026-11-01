@@ -5,8 +5,9 @@
 .DESCRIPTION
     Runs under Windows PowerShell 5.1 (all Windows Server Core ships).
     1. Records the machine (OS, PowerShell, LongPathsEnabled).
-    2. Enables LongPathsEnabled if it is off -- this guest is disposable, and
-       it is what the install script does on a real machine.
+    2. Enables LongPathsEnabled if it is off -- this guest is disposable. On a
+       real machine nothing of pondNT sets it: the core's bootstrap warns,
+       --self-check fails, and an administrator enables it once.
     3. Unpacks the release zip (built with --with-tests) into a fresh folder.
     4. Runs `boring-pondnt-core.cmd --self-check`, `run-tests.cmd` (the whole
        suite, Windows-only tests included; Sourcecache's tests prove

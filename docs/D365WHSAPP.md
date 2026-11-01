@@ -232,9 +232,10 @@ in that mode rather than treating one pass as coverage of both.
 The `form` block takes [d365web.json's keys](D365WEB.md#setup) and drives its own Edge through d365web's
 library, separate from the d365web server's browser: give it its **own profile** (default
 `d365whsapp-form`, under `%LOCALAPPDATA%\boring-pondnt\d365web\profiles`; Edge runs one process per
-profile) and its own `debug_port`. Sign that profile in using
-[d365web's setup procedure](D365WEB.md#setup), under the account that runs
-d365whsapp. When `profiles_dir` is set, it replaces the complete profile path;
+profile) and its own `debug_port`. Sign that profile in, under the account that runs
+d365whsapp: `browser-signin.cmd d365whsapp` in the release folder writes this file with
+those defaults when there is none (address suggested from the box's `web.config`) and
+opens Edge with the profile; by hand, [d365web's setup procedure](D365WEB.md#setup). When `profiles_dir` is set, it replaces the complete profile path;
 give each service a different directory. App keys (`aos_url`, `tenant`, ...)
 may stay in the file; only `mode` decides.
 

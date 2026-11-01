@@ -1,23 +1,31 @@
 # Installing pondNT on a D365 dev box
 
+For disposable D365 development boxes only: no live data, no data you
+cannot afford to lose, no connection to production
+([who can do what](THREAT_MODEL.md)).
+
 pondNT gives Copilot in Visual Studio workspace and D365 tools, three
 independent general services, and optional browser and warehouse tools on a
 Dynamics 365 F&O development box. This page takes a box from download to a
 working connection. The recommended layout keeps core and Knowledge direct
 and puts the other selected services behind Ferry.
-Windows gets one scheduled task per server under `\pondNT\`, and nothing
-else: no Windows service, no registry change, no PATH change.
-`.\setup.ps1 -Uninstall` removes the tasks again (step 9).
+Windows gets one scheduled task per server under `\pondNT\` and locked-down
+permissions on the release folder itself, and nothing else: no Windows
+service, no registry change, no PATH change. `.\setup.ps1 -Uninstall`
+removes the tasks again (step 9).
 
-| Server | Launcher | What it gives Copilot | Needs |
+| Server | Started by | What it gives Copilot | Needs |
 |---|---|---|---|
 | core | `boring-pondnt-core.cmd` | files, commands, jobs on this box | nothing |
-| source index | `boring-sourcecache-d365.cmd` | search the D365 source, elements, labels | an index file (step 5) |
-| d365 | `boring-pondnt-d365.cmd` | build, sync, best practice, results, services, SQL on AxDB | d365fo.tools (step 6) |
-| compiled xref (in D365) | `boring-pondnt-d365.cmd` | who calls / uses / extends what | DYNAMICSXREFDB; independent of PowerShell |
+| d365 | `boring-pondnt-d365.cmd` | build, sync, best practice, results, services, SQL on AxDB; read-only xref (who calls / uses / extends what) | d365fo.tools (step 6); DYNAMICSXREFDB for xref |
+| source index (Sourcecache) | `boring-sourcecache-d365.cmd` | search the D365 source, elements, labels | an index file (step 5) |
+| Knowledge | `boring-knowledge.cmd` | notes the agents keep | nothing |
+| Canvas | `boring-canvas-server.cmd` | shared drawings, with a web page | nothing |
+| d365web (opt-in) | `python -m boring_pondnt.d365web_server` | D365 browser forms | a signed-in Edge ([D365WEB.md](D365WEB.md)) |
+| d365whsapp (opt-in) | `python -m boring_pondnt.d365whsapp_server` | warehouse app protocol or form simulator | a warehouse worker setup ([D365WHSAPP.md](D365WHSAPP.md)) |
+| Ferry (recommended) | `boring-mcp-ferry.cmd` | one entry that discovers and calls the services behind it | nothing |
 
-Knowledge (notes the agents keep) and Canvas (shared drawings) are the other
-two general services. Commands below are for PowerShell (Windows PowerShell
+Commands below are for PowerShell (Windows PowerShell
 5.1 or 7), one per line. This page also comes as `INSTALL.md` next to the
 zip and inside it.
 
@@ -41,6 +49,14 @@ zip and inside it.
 - **d365fo.tools comes from the PowerShell Gallery.** Behind a proxy, or with
   the gallery blocked, `Install-Module d365fo.tools` fails. pondNT works
   without it, except the tools that drive builds and syncs (step 6).
+- **Long paths.** D365 source paths pass Windows' old 260-character limit.
+  pondNT checks the setting and never changes it: `--self-check` fails and
+  the core's `bootstrap` warns while it is off. Check it, and if it prints
+  `0`, an administrator enables it once, then restarts pondNT's servers:
+
+      (Get-ItemProperty HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem).LongPathsEnabled
+      Set-ItemProperty HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem LongPathsEnabled 1
+
 - **Disk and time for the source index.** About 6 GB for two label languages
   (21 GB with all ~190), on a data drive, not C:. The build takes 10-35
   minutes with the Defender exclusion, depending on the disk; many times
@@ -115,28 +131,49 @@ The steps below are what it does, by hand.
 Releases are on
 [GitHub](https://github.com/the-boring-crocodile/boring-pondnt/releases);
 candidates are marked as pre-releases. Each has the zip and a `.sha256` file.
-`TAG` below is the release's tag (`v0.2.0-rc.23`), `VERSION` the version in
-the file name (`0.2.0rc23`). `curl.exe` comes with Windows:
+One block, from the download to the unpacked folder, in PowerShell (as your
+own user; `curl.exe` comes with Windows). `$v` is the version in the file
+name and `$tag` the release's tag: `0.2.9` and `v0.2.9` for a release; a
+candidate writes them differently, `0.2.9rc1` and `v0.2.9-rc.1` (Python's
+spelling in the file name).
 
-    $u = 'https://github.com/the-boring-crocodile/boring-pondnt/releases/download/TAG'
-    curl.exe -LO "$u/boring-pondnt-VERSION-win-x64.zip"
-    curl.exe -LO "$u/boring-pondnt-VERSION-win-x64.zip.sha256"
-    (Get-FileHash .\boring-pondnt-VERSION-win-x64.zip -Algorithm SHA256).Hash.ToLower() -eq (Get-Content .\boring-pondnt-VERSION-win-x64.zip.sha256).Split(' ')[0]
+    $v = '0.2.9'; $tag = "v$v"
+    $f = "boring-pondnt-$v-win-x64.zip"
+    $u = "https://github.com/the-boring-crocodile/boring-pondnt/releases/download/$tag"
+    cd "$env:USERPROFILE\Downloads"
+    curl.exe -fLO "$u/$f"; curl.exe -fLO "$u/$f.sha256"
+    if ((Get-FileHash $f -Algorithm SHA256).Hash -eq (Get-Content "$f.sha256").Split(' ')[0]) {
+        Unblock-File $f
+        Expand-Archive $f C:\tools
+        $p = "C:\tools\boring-pondnt-$v-win-x64"; "unpacked: $p"
+    } else { Write-Error "checksum does not match: delete $f and download again" }
 
-The last line must print `True`. `Invoke-WebRequest` works too, but in
-Windows PowerShell 5.1 it is very slow on a file this size unless
-`$ProgressPreference = 'SilentlyContinue'` is set first. A browser may warn
-that the zip is not commonly downloaded, or Defender may look at it closely:
-it holds Python, PowerShell 7 and their programs. Keep it only if the hash
-matches. Then:
-
-    Unblock-File .\boring-pondnt-VERSION-win-x64.zip
-    Expand-Archive .\boring-pondnt-VERSION-win-x64.zip C:\tools
-    $p = 'C:\tools\boring-pondnt-VERSION-win-x64'
+It must end with `unpacked:` and the folder; read anything red above it. A
+wrong checksum unpacks nothing; delete old copies of the two files from
+Downloads first, so the check compares what you just downloaded. A browser may warn that the zip is not commonly
+downloaded, or Defender may look at it closely: it holds Python,
+PowerShell 7 and their programs. `Unblock-File` removes the Mark of the Web,
+which every file unpacked from the zip would otherwise inherit.
 
 The zip holds one folder; `$p` is that folder, and every command below uses
 it. Everything runs from there: Python 3.14 and PowerShell 7 are inside,
 nothing else is needed.
+
+**Who may change that folder.** Its Python runs as SYSTEM (the general
+services) and elevated (the core and the D365 server), so whoever can add a
+file there can run code as SYSTEM: a `sitecustomize.py` dropped into its
+Python is enough. A folder unpacked under `C:\` inherits `C:\`'s rule that
+every user may add files to new folders. setup.ps1 therefore takes the
+release folder off inheritance before it starts any task (administrators and
+SYSTEM change it, Users read and run it) and checks every file below it; it
+asks first and touches nothing else. It runs the release's own code before
+that (the self-check, the plan, an index build): on a box where other people
+have accounts, lock the folder by hand right after unpacking, before setup; on the usual dev box, with only its
+administrator, there is no one to lock out. By hand, as Administrator:
+
+    icacls $p /inheritance:r /grant:r '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-545:(OI)(CI)RX'
+
+Afterwards only an elevated prompt can delete an old release folder.
 
 ## 2. Defender (optional -- dangerous, read first)
 
@@ -239,7 +276,10 @@ address, port, key file); its task starts the server with that file.
   space). Its folder is created.
 - `--name`: a label for this index, shown in every result and used to pick
   it when a server holds several, e.g. `d365scm-10.0.49` (product and
-  version) or the environment's name. The exact version is recorded anyway.
+  version) or the environment's name. The index records the D365 version only
+  when you give it (`--application-version`, `--platform-version`; see
+  [Sourcecache](https://github.com/the-boring-crocodile/boring-services/blob/main/sourcecache-d365/README.md#building-a-snapshot));
+  setup's own build gives none, so it says `unknown` there.
 - `--locales`: the label languages you read, e.g. `en-US,de` (about 6 GB;
   all ~190 otherwise: 21 GB on the first dev box).
 
@@ -309,9 +349,9 @@ require a new client entry while the gateway URL and key stay the same.
 Copilot's own tools do not come back. Restart Visual Studio or sign in to
 GitHub again.
 
-Both servers keep running between Visual Studio sessions (jobs survive a
-Visual Studio restart); their logs are `service.log` in
-`%LOCALAPPDATA%\boring-pondnt\services\core` and `...\d365`. The D365 server runs
+The servers keep running between Visual Studio sessions (jobs survive a
+Visual Studio restart); each logs to `service.log` in its folder under
+`%LOCALAPPDATA%\boring-pondnt\services\` (`core`, `d365`, ...). The D365 server runs
 elevated (its task's highest run level), as d365fo.tools needs.
 
 ## 8. The first request
@@ -380,6 +420,59 @@ ownership/conflict messages, then use `retry_apply` to retry with normal prompts
 Keep the named release folder until recovery is complete. Existing notebook,
 canvas, handbook and index data stay in their original locations.
 
+## 10. Update, and back
+
+An update is the new release's setup run over the old installation, with
+the same choices. Nothing is removed until you are content, and going back
+is the old release's setup run the same way. Keys, the notebook, canvases,
+the handbook and the index stay where they are throughout.
+
+**1. Unpack beside the old one.** Download, check and unpack as in step 1,
+into its own folder (`C:\tools\boring-pondnt-NEW-win-x64`). Leave the old
+folder where it is: it is your way back. Read the release's CHANGELOG for
+anything that changes data; a release that does says so, and then the way
+back is your backup, not the old folder.
+
+**2. Write down what is installed.** setup touches only the services you
+name, so name all of them; one left out keeps running from the old folder.
+
+    Get-ScheduledTask -TaskPath '\pondNT\' | ForEach-Object { $_.TaskName + '  ' + $_.Actions[0].Execute + ' ' + $_.Actions[0].Arguments }
+
+The task names give the selection (`pondNT boring-pondnt` is `core`,
+`boring-d365web` is `d365web`, and so on; `boring-gateway` is the gateway,
+which `-Gateway keep` keeps as it is). Note the index file Sourcecache
+uses: setup recognises that task only with `-Index`.
+
+**3. Look, then apply**, in an elevated PowerShell in the new folder:
+
+    powershell -ExecutionPolicy Bypass -File .\setup.ps1 -WhatIf -SkipIndex -Gateway keep -Services 'sourcecache,knowledge,canvas,core,d365' -Index J:\pondnt\d365.db
+    powershell -ExecutionPolicy Bypass -File .\setup.ps1 -Yes -SkipIndex -Gateway keep -Services 'sourcecache,knowledge,canvas,core,d365' -Index J:\pondnt\d365.db
+
+The preview should say "key kept" for every service (a key with fewer than
+30 days left says "new key": it is renewed) and name no service you did not
+expect. `-Yes` does not add a Defender exclusion; if you use
+one, the new python needs its own (`-AddDefenderExclusion`, step 2).
+
+**4. Check.** Every task now starts the new folder's python (the command
+from 2 again), `.\boring-pondnt-core.cmd --self-check` passes, and in Visual
+Studio one call answers (`bootstrap` names the new version).
+
+**5. Back, if needed.** In the old folder, the same command as in 3: its
+setup takes the tasks back to the old python. Then check as in 4. A release
+before 0.2.9 does not lock its folder: run the `icacls` line from step 1 on
+the old folder first, or going back reopens what 0.2.9 closed.
+
+**6. Tidy up, once content.** Remove the Defender exclusions of the old
+python only (`Remove-MpPreference -ExclusionProcess 'C:\tools\boring-pondnt-OLD-win-x64\python\python.exe'`,
+and the same for `pythonw.exe`), then delete the old folder from an
+elevated prompt (setup locked it to administrators). Do not run the old
+release's `-Uninstall` for this: it removes the tasks, which now belong to
+the new release.
+
+**With a manual launcher** (CMD files that start the servers instead of
+scheduled tasks): stop the old processes, point the launcher at the new
+folder, start it, and check as in 4; the way back is the old launcher.
+
 ## Optional: reaching the box from a Pond
 
 Not part of a normal installation. The servers can also run as services of
@@ -420,6 +513,9 @@ limit. `%LOCALAPPDATA%` is that of the person who ran setup.
 Each folder holds the server's `config.json`, `keys.json` and `service.log`.
 Besides the tasks, setup writes:
 
+- the release folder's permissions: off inheritance, administrators and
+  SYSTEM full, Users read and run ([who may change that folder](#1-download-check-and-unpack));
+
 - `%USERPROFILE%\.mcp.json`: three entries for the recommended layout,
   or one per directly exposed server. A needed change gets a backup next to
   it (`.mcp.json.bak-<time>-<id>`); an unchanged file is left alone;
@@ -445,8 +541,9 @@ own account does not fire at boot on these VMs; they need no stored password
 and show no window.
 
 This installer is limited to the single-administrator disposable development
-box. The release and state directory are developer-writable, and scheduled services
-run as SYSTEM. This is not an isolation boundary against that developer.
+box. The release folder is locked to administrators, which that developer is,
+and the state directory is the developer's own; scheduled services run as
+SYSTEM. This is not an isolation boundary against that developer.
 For shared machines, use the separately configured standalone services and a
 reviewed service identity instead of assuming this installer supplies one.
 
@@ -473,7 +570,8 @@ interface only, but the key itself is not bound to the device: it is a bearer
 secret, and whoever holds it and can reach the port acts with its role. Keep
 `.mcp.json` private.
 
-**Keys by hand** (for example for a colleague, or an offsite service over HTTPS):
+**Keys by hand** (for example for a colleague, or an offsite service over HTTPS). Not for
+the core: its `file_read` reads `.mcp.json` too, so every core key is a full key:
 
     boring-service-keys.cmd add --file <folder>\keys.json --subject colleague@box --role reader --days 90
     boring-service-keys.cmd list --file <folder>\keys.json
