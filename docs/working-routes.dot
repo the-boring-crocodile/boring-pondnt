@@ -3,7 +3,7 @@
 digraph routes {
 graph [rankdir=TB, newrank=true, splines=line, nodesep=0.55, ranksep=0.7,
  bgcolor="#ffffff", pad=0.25, fontname="Helvetica", fontsize=10, labelloc=t, labeljust=l,
- label=<<TABLE BORDER="0" CELLSPACING="6"><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="18"><B>Two routes, one D365 environment</B></FONT></TD></TR><TR><TD ALIGN="LEFT">Connection view · supported composition · 2026-10-30</TD></TR><TR><TD ALIGN="LEFT">Separate endpoints do not isolate the underlying development work.</TD></TR></TABLE>>];
+ label=<<TABLE BORDER="0" CELLSPACING="6"><TR><TD ALIGN="LEFT"><FONT POINT-SIZE="18"><B>Two routes, one D365 environment</B></FONT></TD></TR><TR><TD ALIGN="LEFT">Connection view · supported composition</TD></TR><TR><TD ALIGN="LEFT">Separate endpoints do not isolate the underlying development work.</TD></TR></TABLE>>];
 node [shape=box,style=filled,fillcolor="#edf5ef",color="#7a9783",fontcolor="#111111",
  fontname="Helvetica",fontsize=10,width=2.95,height=1.05,fixedsize=true,margin="0.16,0.1"];
 edge [arrowsize=0.7,penwidth=1.4,color="#587b96",fontname="Helvetica",fontsize=10];

@@ -30,7 +30,12 @@ what to do when a call returns before the UI settles.
    environment and the permissions needed for the planned checks. Sign-in happens
    in Edge; the service reuses that session. Choose the intended environment and
    an existing company before signing in; `usmf` below is a Contoso example.
-2. **Sign the profile in once**, on the machine's desktop (an interactive session, not over SSH):
+2. **Sign the profile in once**, on the machine's desktop (an interactive session, not over SSH).
+   The short way: double-click `browser-signin.cmd` in the release folder, as
+   yourself. It asks for the service, suggests the AOS address from the box's
+   `web.config`, asks for the company, writes `d365web.json` (step 3) when there
+   is none, and opens Edge with the profile; an existing `d365web.json` is used
+   and left alone. By hand:
 
    ```bat
    "C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe" ^
@@ -243,12 +248,67 @@ For an action test, choose a disposable fixture and an explicit expected
 transition. A scenario expectation checks the UI it can observe; verify a
 persisted business effect separately when that is the test's goal.
 
+### From nothing to the first check, in one go
+
+The steps above, joined for a box where pondNT is already installed with the
+recommended layout (core and Knowledge direct, the rest behind the gateway),
+as you would do them on the box's desktop:
+
+1. **Sign in a dedicated profile and write the configuration:** double-click
+   `browser-signin.cmd` in the release folder, as yourself (not elevated).
+   Answer `d365web`, take the suggested AOS address or type yours, and the
+   company. It writes
+   `%LOCALAPPDATA%\boring-pondnt\services\d365web\d365web.json` (setup refuses
+   d365web while it is missing) and opens Edge with the profile. Sign in, wait
+   for the dashboard, close Edge.
+2. **Check what it wrote** (Setup 3 explains each key):
+
+   ```powershell
+   Get-Content "$env:LOCALAPPDATA\boring-pondnt\services\d365web\d365web.json"
+   ```
+
+3. **Add it with everything you already have** (an elevated PowerShell in
+   the release folder; list every installed service, see
+   [Update, and back](INSTALL.md#10-update-and-back), step 2):
+
+   ```powershell
+   powershell -ExecutionPolicy Bypass -File .\setup.ps1 -WhatIf -SkipIndex -Gateway all -Services 'sourcecache,knowledge,canvas,core,d365,d365web' -Index J:\pondnt\d365.db
+   powershell -ExecutionPolicy Bypass -File .\setup.ps1 -Yes -SkipIndex -Gateway all -Services 'sourcecache,knowledge,canvas,core,d365,d365web' -Index J:\pondnt\d365.db
+   ```
+
+   The preview names `boring-d365web` as a new service carried by
+   boring-gateway, and every other key as kept. The `.mcp.json` entries do
+   not change, so Visual Studio needs no new connection.
+4. **Find it through the gateway.** In Visual Studio (Copilot, Agent mode),
+   ask for boring-gateway's `service_list`: `d365web` is listed and answers.
+   `service_describe` with `{"service": "d365web"}` shows its tools and this
+   page's guidance.
+5. **The read-only first check**, through the gateway:
+
+   ```json
+   service_call  {"service": "d365web", "tool": "web_open", "arguments": {"menu_item": "PurchTableListPage", "company": "usmf"}}
+   service_read  {"service": "d365web", "tool": "web_wait", "arguments": {}}
+   service_read  {"service": "d365web", "tool": "web_state", "arguments": {"full": true}}
+   ```
+
+   `web_wait` is needed only if `web_open` answered `running`. The state
+   shows the purchase order list (form `PurchTable`, "All purchase orders")
+   with its filter and buttons; nothing was created. `service_call` with
+   `web_close` ends it. Steps 4 and 5 were tried once like this on our test
+   box, through its real gateway (pondNT 0.2.8, application 10.0.49), where
+   d365web was already set up; steps 1 to 3 are the setup described above, with `browser-signin.cmd`
+for steps 1 and 2.
+
+If step 5 answers `signin_required`, the profile's sign-in expired or
+belongs to another profile: run `browser-signin.cmd` again (it takes the
+profile from `d365web.json`).
+
 ### Earlier workflow evidence
 
-A development-box run on 2026-10-23 created and confirmed purchase and sales
+On a development box, D365WEB created and confirmed purchase and sales
 orders, created a customer, posted a general journal and a free-text invoice,
-and read an on-hand inquiry. Those are historical observations of that
-environment, not a first-run recipe or acceptance of every form, extension,
+and read an on-hand inquiry. Those are observations of that environment and
+that release, not a first-run recipe or acceptance of every form, extension,
 browser mode or later release.
 
 ## Limits

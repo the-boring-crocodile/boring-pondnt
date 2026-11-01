@@ -10,7 +10,7 @@
 <title>routes</title>
 <polygon fill="#ffffff" stroke="none" points="-18,18 -18,-586.55 516,-586.55 516,18 -18,18"/>
 <text xml:space="preserve" text-anchor="start" x="16" y="-540.45" font-family="Helvetica,sans-Serif" font-weight="bold" font-size="18.00">Two routes, one D365 environment</text>
-<text xml:space="preserve" text-anchor="start" x="16" y="-515.3" font-family="Helvetica,sans-Serif" font-size="10.00">Connection view · supported composition · 2026&#45;10&#45;30</text>
+<text xml:space="preserve" text-anchor="start" x="16" y="-515.3" font-family="Helvetica,sans-Serif" font-size="10.00">Connection view · supported composition</text>
 <text xml:space="preserve" text-anchor="start" x="16" y="-492.55" font-family="Helvetica,sans-Serif" font-size="10.00">Separate endpoints do not isolate the underlying development work.</text>
 <!-- pond -->
 <g id="node1" class="node">

@@ -1,0 +1,82 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="694pt" height="783pt" viewBox="0 0 694 783">
+<rect x="0" y="0" width="694" height="783" fill="#121212"/>
+<text x="20.0" y="36.0" font-family="Helvetica,Arial,sans-serif" font-size="18" font-weight="bold" fill="#dfdfdf" xml:space="preserve">pondNT: Copilot's tools on a D365 dev box</text>
+<text x="20.0" y="56.0" font-family="Helvetica,Arial,sans-serif" font-size="10" fill="#dfdfdf" xml:space="preserve">Container view · pondNT 0.2.9, the recommended layout</text>
+<text x="20.0" y="72.0" font-family="Helvetica,Arial,sans-serif" font-size="10" fill="#dfdfdf" xml:space="preserve">Small MCP servers between Copilot and a disposable Windows box, plus what Visual Studio does not know.</text>
+<g class="cluster"><rect x="6" y="90" width="664" height="527" fill="none" stroke="#656c69" stroke-width="1"/>
+<text x="16.0" y="607.0" font-family="Helvetica,Arial,sans-serif" font-size="10" fill="#dfdfdf" xml:space="preserve">A D365 dev box · Windows · disposable: no data you cannot afford to lose</text>
+</g>
+<g class="edge"><title>copilot->core</title><path fill="none" stroke="#6f8da4" stroke-width="1.4" d="M278.2,174.0 L183.5,229.5"/><polygon fill="#6f8da4" stroke="#6f8da4" points="175.8,234.0 185.6,232.9 181.5,226.0"/></g>
+<g class="edge"><title>copilot->knowledge</title><path fill="none" stroke="#6f8da4" stroke-width="1.4" d="M338.0,174.0 L338.0,225.0"/><polygon fill="#6f8da4" stroke="#6f8da4" points="338.0,234.0 342.0,225.0 334.0,225.0"/></g>
+<g class="edge"><title>copilot->ferry</title><path fill="none" stroke="#6f8da4" stroke-width="1.4" d="M397.8,174.0 L492.5,229.5"/><polygon fill="#6f8da4" stroke="#6f8da4" points="500.2,234.0 494.5,226.0 490.4,232.9"/></g>
+<g class="edge"><title>ferry->d365</title><path fill="none" stroke="#6f8da4" stroke-width="1.4" d="M464.0,304.0 L220.7,371.6"/><polygon fill="#6f8da4" stroke="#6f8da4" points="212.0,374.0 221.7,375.4 219.6,367.7"/></g>
+<g class="edge"><title>ferry->sc</title><path fill="none" stroke="#6f8da4" stroke-width="1.4" d="M501.4,304.0 L391.8,369.4"/><polygon fill="#6f8da4" stroke="#6f8da4" points="384.1,374.0 393.9,372.8 389.8,366.0"/></g>
+<g class="edge"><title>ferry->web</title><path fill="none" stroke="#6f8da4" stroke-width="1.4" d="M560.0,304.0 L560.0,365.0"/><polygon fill="#6f8da4" stroke="#6f8da4" points="560.0,374.0 564.0,365.0 556.0,365.0"/></g>
+<g class="edge"><title>d365->env</title><path fill="none" stroke="#9d7f58" stroke-dasharray="1.5,4" stroke-linecap="round" stroke-width="2" d="M187.2,459.0 L271.6,509.4"/><polygon fill="#9d7f58" stroke="#9d7f58" points="279.4,514.0 273.7,506.0 269.6,512.8"/></g>
+<g class="edge"><title>web->env</title><path fill="none" stroke="#689b94" stroke-width="1.4" d="M504.5,444.0 L401.1,509.2"/><polygon fill="#689b94" stroke="#689b94" points="393.5,514.0 403.2,512.6 399.0,505.8"/></g>
+<g class="node"><title>copilot</title><rect x="242" y="104" width="192" height="70" fill="#1a1e25" stroke="#697c94" stroke-width="1.2"/>
+<text x="252.0" y="122.0" font-family="Helvetica,Arial,sans-serif" font-size="12" font-weight="bold" fill="#dfdfdf" xml:space="preserve">Copilot</text>
+<text x="252.0" y="137.0" font-family="Helvetica,Arial,sans-serif" font-size="10" fill="#dfdfdf" xml:space="preserve">[Visual Studio · same box]</text>
+<text x="252.0" y="152.0" font-family="Helvetica,Arial,sans-serif" font-size="10" fill="#dfdfdf" xml:space="preserve">three MCP entries:</text>
+<text x="252.0" y="167.0" font-family="Helvetica,Arial,sans-serif" font-size="10" fill="#dfdfdf" xml:space="preserve">core, Knowledge, Ferry</text>
+<path transform="translate(402,112) scale(0.917)" d="M3.5 4.5h17v11.5H10l-5 4v-4H3.5z M7.5 9h9 M7.5 12h6" fill="none" stroke="#697c94" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></g>
+<g class="node"><title>core</title><rect x="20" y="234" width="192" height="70" fill="#171e19" stroke="#5f7867" stroke-width="1.2"/>
+<text x="30.0" y="252.0" font-family="Helvetica,Arial,sans-serif" font-size="12" font-weight="bold" fill="#dfdfdf" xml:space="preserve">core</text>
+<text x="30.0" y="267.0" font-family="Helvetica,Arial,sans-serif" font-size="10" fill="#dfdfdf" xml:space="preserve">[pondNT · you, elevated]</text>
+<text x="30.0" y="282.0" font-family="Helvetica,Arial,sans-serif" font-size="10" fill="#dfdfdf" xml:space="preserve">files, commands, long</text>
+<text x="30.0" y="297.0" font-family="Helvetica,Arial,sans-serif" font-size="10" fill="#dfdfdf" xml:space="preserve">jobs on the box</text>
+<path transform="translate(180,242) scale(0.917)" d="M9 6.5 3.5 12 9 17.5 M15 6.5 20.5 12 15 17.5" fill="none" stroke="#5f7867" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></g>
+<g class="node"><title>knowledge</title><rect x="242" y="234" width="192" height="55" fill="#171e19" stroke="#5f7867" stroke-width="1.2"/>
+<text x="252.0" y="252.0" font-family="Helvetica,Arial,sans-serif" font-size="12" font-weight="bold" fill="#dfdfdf" xml:space="preserve">Knowledge</text>
+<text x="252.0" y="267.0" font-family="Helvetica,Arial,sans-serif" font-size="10" fill="#dfdfdf" xml:space="preserve">[service · SYSTEM]</text>
+<text x="252.0" y="282.0" font-family="Helvetica,Arial,sans-serif" font-size="10" fill="#dfdfdf" xml:space="preserve">the agent's notebook</text>
+<path transform="translate(402,242) scale(0.917)" d="M6 2.5h8.5l4 4v15H6z M14.5 2.5v4h4 M9 12h6 M9 15.5h6" fill="none" stroke="#5f7867" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></g>
+<g class="node"><title>ferry</title><rect x="464" y="234" width="192" height="70" fill="#171e19" stroke="#5f7867" stroke-width="1.2"/>
+<text x="474.0" y="252.0" font-family="Helvetica,Arial,sans-serif" font-size="12" font-weight="bold" fill="#dfdfdf" xml:space="preserve">Ferry</text>
+<text x="474.0" y="267.0" font-family="Helvetica,Arial,sans-serif" font-size="10" fill="#dfdfdf" xml:space="preserve">[gateway · SYSTEM]</text>
+<text x="474.0" y="282.0" font-family="Helvetica,Arial,sans-serif" font-size="10" fill="#dfdfdf" xml:space="preserve">four tools for the rest,</text>
+<text x="474.0" y="297.0" font-family="Helvetica,Arial,sans-serif" font-size="10" fill="#dfdfdf" xml:space="preserve">discovered when needed</text>
+<path transform="translate(624,242) scale(0.917)" d="M3.5 8h14 M14.5 5l3 3-3 3 M20.5 16h-14 M9.5 13l-3 3 3 3" fill="none" stroke="#5f7867" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></g>
+<g class="node"><title>d365</title><rect x="20" y="374" width="192" height="85" fill="#171e19" stroke="#5f7867" stroke-width="1.2"/>
+<text x="30.0" y="392.0" font-family="Helvetica,Arial,sans-serif" font-size="12" font-weight="bold" fill="#dfdfdf" xml:space="preserve">D365 server</text>
+<text x="30.0" y="407.0" font-family="Helvetica,Arial,sans-serif" font-size="10" fill="#dfdfdf" xml:space="preserve">[pondNT · you, elevated]</text>
+<text x="30.0" y="422.0" font-family="Helvetica,Arial,sans-serif" font-size="10" fill="#dfdfdf" xml:space="preserve">build, sync, SQL, xref;</text>
+<text x="30.0" y="437.0" font-family="Helvetica,Arial,sans-serif" font-size="10" fill="#dfdfdf" xml:space="preserve">answers to a writer key;</text>
+<text x="30.0" y="452.0" font-family="Helvetica,Arial,sans-serif" font-size="10" fill="#dfdfdf" xml:space="preserve">Ferry holds it</text>
+<path transform="translate(180,382) scale(0.917)" d="M9 6.5 3.5 12 9 17.5 M15 6.5 20.5 12 15 17.5" fill="none" stroke="#5f7867" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></g>
+<g class="node"><title>sc</title><rect x="242" y="374" width="192" height="55" fill="#171e19" stroke="#5f7867" stroke-width="1.2"/>
+<text x="252.0" y="392.0" font-family="Helvetica,Arial,sans-serif" font-size="12" font-weight="bold" fill="#dfdfdf" xml:space="preserve">Sourcecache, Canvas</text>
+<text x="252.0" y="407.0" font-family="Helvetica,Arial,sans-serif" font-size="10" fill="#dfdfdf" xml:space="preserve">[services · SYSTEM]</text>
+<text x="252.0" y="422.0" font-family="Helvetica,Arial,sans-serif" font-size="10" fill="#dfdfdf" xml:space="preserve">source index; drawings</text>
+<path transform="translate(402,382) scale(0.917)" d="M9 6.5 3.5 12 9 17.5 M15 6.5 20.5 12 15 17.5" fill="none" stroke="#5f7867" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></g>
+<g class="node"><title>web</title><rect x="464" y="374" width="192" height="70" fill="#171e19" stroke="#5f7867" stroke-width="1.2"/>
+<text x="474.0" y="392.0" font-family="Helvetica,Arial,sans-serif" font-size="12" font-weight="bold" fill="#dfdfdf" xml:space="preserve">Browser, warehouse</text>
+<text x="474.0" y="407.0" font-family="Helvetica,Arial,sans-serif" font-size="10" fill="#dfdfdf" xml:space="preserve">[you, elevated · opt-in]</text>
+<text x="474.0" y="422.0" font-family="Helvetica,Arial,sans-serif" font-size="10" fill="#dfdfdf" xml:space="preserve">D365 forms and warehouse</text>
+<text x="474.0" y="437.0" font-family="Helvetica,Arial,sans-serif" font-size="10" fill="#dfdfdf" xml:space="preserve">screens, as a person would</text>
+<path transform="translate(624,382) scale(0.917)" d="M9 6.5 3.5 12 9 17.5 M15 6.5 20.5 12 15 17.5" fill="none" stroke="#5f7867" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></g>
+<g class="node"><title>env</title><rect x="242" y="514" width="192" height="70" fill="#1b1b19" stroke="#747570" stroke-width="1.2"/>
+<text x="252.0" y="532.0" font-family="Helvetica,Arial,sans-serif" font-size="12" font-weight="bold" fill="#dfdfdf" xml:space="preserve">D365 environment</text>
+<text x="252.0" y="547.0" font-family="Helvetica,Arial,sans-serif" font-size="10" fill="#dfdfdf" xml:space="preserve">[AOS, AxDB, source]</text>
+<text x="252.0" y="562.0" font-family="Helvetica,Arial,sans-serif" font-size="10" fill="#dfdfdf" xml:space="preserve">the system all of it</text>
+<text x="252.0" y="577.0" font-family="Helvetica,Arial,sans-serif" font-size="10" fill="#dfdfdf" xml:space="preserve">works on</text>
+<path transform="translate(402,522) scale(0.917)" d="M12 8.5a3.5 3.5 0 1 1 0 7a3.5 3.5 0 1 1 0-7z M12 2.5v3 M12 18.5v3 M2.5 12h3 M18.5 12h3 M5.3 5.3l2.1 2.1 M16.6 16.6l2.1 2.1 M5.3 18.7l2.1-2.1 M16.6 7.4l2.1-2.1" fill="none" stroke="#747570" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></g>
+<text x="20.0" y="651.0" font-family="Helvetica,Arial,sans-serif" font-size="12" font-weight="bold" fill="#dfdfdf" xml:space="preserve">Read the picture</text>
+<text x="20.0" y="667.0" font-family="Helvetica,Arial,sans-serif" font-size="10" font-weight="bold" fill="#7b9682" xml:space="preserve">Sage box · the Pond family</text>
+<text x="20.0" y="683.0" font-family="Helvetica,Arial,sans-serif" font-size="10" font-weight="bold" fill="#7f95b5" xml:space="preserve">Pale blue box · a person, their client</text>
+<text x="20.0" y="699.0" font-family="Helvetica,Arial,sans-serif" font-size="10" fill="#dfdfdf" xml:space="preserve">Grey box · others' software or data</text>
+<text x="20.0" y="715.0" font-family="Helvetica,Arial,sans-serif" font-size="10" fill="#dfdfdf" xml:space="preserve">Frame: its label says what it is</text>
+<text x="20.0" y="731.0" font-family="Helvetica,Arial,sans-serif" font-size="10" fill="#dfdfdf" xml:space="preserve">Arrow: from caller to callee</text>
+<text x="242.0" y="651.0" font-family="Helvetica,Arial,sans-serif" font-size="12" font-weight="bold" fill="#dfdfdf" xml:space="preserve">Lines</text>
+<text x="242.0" y="667.0" font-family="Helvetica,Arial,sans-serif" font-size="10" font-weight="bold" fill="#6f8da4" xml:space="preserve">Blue · MCP, wherever it runs</text>
+<text x="242.0" y="683.0" font-family="Helvetica,Arial,sans-serif" font-size="10" font-weight="bold" fill="#689b94" xml:space="preserve">Teal · plain HTTPS (a browser, bytes)</text>
+<text x="242.0" y="699.0" font-family="Helvetica,Arial,sans-serif" font-size="10" font-weight="bold" fill="#9d7f58" xml:space="preserve">Dotted ochre · not MCP, local:</text>
+<text x="242.0" y="715.0" font-family="Helvetica,Arial,sans-serif" font-size="10" fill="#dfdfdf" xml:space="preserve">a socket, a file, a command</text>
+<text x="464.0" y="651.0" font-family="Helvetica,Arial,sans-serif" font-size="12" font-weight="bold" fill="#dfdfdf" xml:space="preserve">Scope and limits</text>
+<text x="464.0" y="667.0" font-family="Helvetica,Arial,sans-serif" font-size="10" fill="#dfdfdf" xml:space="preserve">core runs commands as you, elevated:</text>
+<text x="464.0" y="683.0" font-family="Helvetica,Arial,sans-serif" font-size="10" fill="#dfdfdf" xml:space="preserve">they reach everything on the box.</text>
+<text x="464.0" y="699.0" font-family="Helvetica,Arial,sans-serif" font-size="10" fill="#dfdfdf" xml:space="preserve">Each server: 127.0.0.1, its own key.</text>
+<text x="464.0" y="715.0" font-family="Helvetica,Arial,sans-serif" font-size="10" fill="#dfdfdf" xml:space="preserve">Optional: a Linux Pond calls core and</text>
+<text x="464.0" y="731.0" font-family="Helvetica,Arial,sans-serif" font-size="10" fill="#dfdfdf" xml:space="preserve">D365 through an SSH tunnel the box</text>
+<text x="464.0" y="747.0" font-family="Helvetica,Arial,sans-serif" font-size="10" fill="#dfdfdf" xml:space="preserve">dials out (not drawn).</text>
+</svg>

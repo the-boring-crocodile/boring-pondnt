@@ -117,7 +117,7 @@ def create_server(kit: Path | None = None, state_dir: Path | None = None,
     `call_budget` (behind a Pond: every call must answer within the Pond's call
     bound, ServiceConfig.call_limit) caps exec, job_wait and batch at that many
     seconds and makes those the defaults. The descriptions say so, since a Pond
-    agent sees only them. None (stdio, or HTTP for Copilot on loopback): no cap.
+    agent sees only them. None (HTTP for Copilot on loopback): no cap.
 
     A server that authenticates callers (any ServiceConfig: issuer, oauth or keys)
     authorizes every call by the caller's role. Without authentication (in-process
