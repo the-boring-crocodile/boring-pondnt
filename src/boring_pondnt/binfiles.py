@@ -43,17 +43,17 @@ def decode_write(data: str, expected_sha256: str | None, offset: int | None) -> 
 def read_bytes(path: str, offset: int = 0, length: int = CHUNK_MAX) -> dict[str, Any]:
     check_read(offset, length)
     p = disk.absolute(path)
-    data = disk.read_bytes(p, FILE_MAX)
-    chunk = data[offset:offset + length]
+    # streamed: a client paging a 64 MiB file in 1 MiB chunks must not load the whole file per chunk
+    chunk, size, sha256 = disk.read_range(p, FILE_MAX, offset, length)
     end = offset + len(chunk)
     return {
         "path": str(p),
         "data": base64.b64encode(chunk).decode("ascii"),
         "offset": offset,
         "length": len(chunk),
-        "size": len(data),
-        "eof": end >= len(data),
-        "sha256": sha256_bytes(data),
+        "size": size,
+        "eof": end >= size,
+        "sha256": sha256,
     }
 
 

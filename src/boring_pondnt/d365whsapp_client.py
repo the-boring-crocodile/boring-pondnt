@@ -14,25 +14,21 @@ from __future__ import annotations
 
 import json
 import socket
-import sys
 import threading
 import time
-import urllib.error
-import urllib.parse
-import urllib.request
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
+from .d365_entra import EntraError, Response, TokenSource, Transport, read_dpapi_secret, urllib_transport
 from .d365whsapp_protocol import BUTTON_TYPES, Page, ProtocolError, ServiceError, build_request, parse_page, parse_service_error
-from .whs_steps import View, exit_button
+from .whs_steps import LOGOFF_STEPS_MAX, View, exit_button
+from .whs_logoff import LogoffItems, LookupError, LookupPending, LOOKUP_SECONDS, MAX_BYTES, configured_buttons, lookup_path, names_from_reply
 
 SERVICE_PATH = "/api/services/WHSMobileAppServices/WHSMobileAppService"
 STEP_TIMEOUT_DEFAULT = 300.0  # a confirm with work creation took > 28 s live
-TOKEN_TIMEOUT = 30.0
 DEVICE_NAMESPACE = uuid.UUID("6f1c1d0e-3a52-4b8e-9f0b-776873617070")
-LOGOFF_STEPS_MAX = 8
 
 
 class WhsError(Exception):
@@ -61,82 +57,20 @@ class Config:
     secret_file: str = ""
     company: str = ""  # no built-in company: whs_login(company=...) or this default
     step_timeout: float = STEP_TIMEOUT_DEFAULT
+    logoff_buttons: list[str] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        self.logoff_buttons = configured_buttons(self.logoff_buttons)
+        if not str(self.aos_url).lower().startswith("https://"):
+            raise ValueError("aos_url must be an https:// URL (the bearer token goes there)")
 
     @classmethod
     def load(cls, path: Path) -> "Config":
         data = json.loads(path.read_text(encoding="utf-8-sig"))  # PowerShell 5 Set-Content writes a BOM
-        known = {k: data[k] for k in ("aos_url", "tenant", "client_id", "secret_file", "company", "step_timeout")
+        known = {k: data[k] for k in ("aos_url", "tenant", "client_id", "secret_file", "company", "step_timeout", "logoff_buttons")
                  if k in data}
         return cls(**known)
 
-
-def read_dpapi_secret(path: str) -> str:
-    """A secret written by `ConvertFrom-SecureString` (DPAPI, current user): hex of the blob."""
-    if sys.platform != "win32":
-        raise WhsError("secret_unavailable", "DPAPI secrets can only be read on Windows")
-    import ctypes
-    from ctypes import wintypes
-
-    class Blob(ctypes.Structure):
-        _fields_ = [("cbData", wintypes.DWORD), ("pbData", ctypes.POINTER(ctypes.c_char))]
-
-    try:
-        raw = bytes.fromhex(Path(path).read_text(encoding="utf-8-sig").strip())
-    except (OSError, ValueError) as exc:
-        raise WhsError("secret_unavailable", f"cannot read the client secret file: {exc}") from None
-    buffer = ctypes.create_string_buffer(raw, len(raw))
-    blob_in, blob_out = Blob(len(raw), buffer), Blob()
-    crypt32, kernel32 = ctypes.windll.crypt32, ctypes.windll.kernel32  # type: ignore[attr-defined]
-    if not crypt32.CryptUnprotectData(ctypes.byref(blob_in), None, None, None, None, 0, ctypes.byref(blob_out)):
-        raise WhsError("secret_unavailable", "DPAPI could not decrypt the client secret (other user or machine?)")
-    try:
-        return ctypes.string_at(blob_out.pbData, blob_out.cbData).decode("utf-16-le")
-    finally:
-        kernel32.LocalFree(blob_out.pbData)
-
-
-@dataclass
-class Response:
-    status: int
-    text: str
-
-
-Transport = Callable[[str, dict[str, str], bytes, float], Response]
-
-
-def urllib_transport(url: str, headers: dict[str, str], body: bytes, timeout: float) -> Response:
-    request = urllib.request.Request(url, data=body, headers=headers, method="POST")
-    try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            return Response(response.status, response.read().decode("utf-8"))
-    except urllib.error.HTTPError as exc:
-        return Response(exc.code, exc.read().decode("utf-8", "replace"))
-
-
-class TokenSource:
-    def __init__(self, config: Config, transport: Transport, secret: Callable[[], str]) -> None:
-        self.config, self.transport, self.secret = config, transport, secret
-        self._token, self._expires = "", 0.0
-        self._lock = threading.Lock()
-
-    def get(self) -> str:
-        with self._lock:
-            if self._token and time.monotonic() < self._expires - 120:
-                return self._token
-            body = urllib.parse.urlencode({
-                "grant_type": "client_credentials", "client_id": self.config.client_id,
-                "client_secret": self.secret(), "scope": f"{self.config.client_id}/.default"}).encode()
-            url = f"https://login.microsoftonline.com/{self.config.tenant}/oauth2/v2.0/token"
-            try:
-                response = self.transport(url, {"Content-Type": "application/x-www-form-urlencoded"}, body, TOKEN_TIMEOUT)
-            except (OSError, socket.timeout) as exc:
-                raise WhsError("token_failed", f"Entra token request failed: {exc}") from None
-            if response.status != 200:
-                raise WhsError("token_failed", f"Entra token request: HTTP {response.status}: {response.text[:300]}")
-            data = json.loads(response.text)
-            self._token = data["access_token"]
-            self._expires = time.monotonic() + float(data.get("expires_in", 3600))
-            return self._token
 
 
 def device_id_for(worker: str) -> str:
@@ -157,20 +91,32 @@ class WhsClient:
     def __init__(self, config: Config, transport: Transport = urllib_transport,
                  secret: Callable[[], str] | None = None) -> None:
         self.config, self.transport = config, transport
-        self.tokens = TokenSource(config, transport, secret or (lambda: read_dpapi_secret(config.secret_file)))
+        credentials = secret or (lambda: read_dpapi_secret(config.secret_file))
+        self.tokens = TokenSource(config.tenant, config.client_id, f"{config.client_id}/.default", transport, credentials)
+        self.data_tokens = TokenSource(config.tenant, config.client_id, config.aos_url.rstrip("/") + "/.default",
+                                       transport, credentials)
+        self.logoff_items = LogoffItems(config.logoff_buttons)
         self.sessions: dict[str, WorkerSession] = {}
         self._lock = threading.Lock()
+        self.call_timeout: float | None = None  # a single call's limit (the Pond's budget); a run's step: step_timeout
 
     # --- the service -------------------------------------------------------
     def call(self, method: str, payload: dict[str, Any], timeout: float | None = None) -> str:
         url = self.config.aos_url.rstrip("/") + f"{SERVICE_PATH}/{method}"
-        headers = {"Authorization": f"Bearer {self.tokens.get()}", "Content-Type": "application/json"}
         try:
-            response = self.transport(url, headers, json.dumps(payload).encode(), timeout or self.config.step_timeout)
+            token = self.tokens.get()
+        except EntraError as error:
+            raise WhsError(error.code, error.message) from None
+        headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+        limit = timeout or self.call_timeout or self.config.step_timeout
+        try:
+            response = self.transport(url, headers, json.dumps(payload).encode(), limit)
         except (socket.timeout, TimeoutError) as exc:
-            raise WhsError("timeout", f"no reply within {timeout or self.config.step_timeout:.0f} s: {exc}") from None
+            raise WhsError("timeout", f"no reply within {limit:.0f} s: {exc}") from None
         except OSError as exc:
             raise WhsError("unreachable", f"AOS not reachable: {exc}") from None
+        if response.status == 401:
+            self.tokens.invalidate(token)  # never sent again; a step is not repeated (it may have run)
         if response.status != 200:
             error = parse_service_error(response.status, response.text)
             raise WhsError(error.code or f"http_{response.status}", error.message)
@@ -180,8 +126,8 @@ class WhsClient:
             raise WhsError("bad_reply", f"reply is not JSON: {response.text[:200]}") from None
         return value
 
-    def exchange(self, xml: str, company: str) -> Page:
-        reply = self.call("getNextFormHandHeld", {"_xml": xml, "_dataAreaId": company})
+    def exchange(self, xml: str, company: str, timeout: float | None = None) -> Page:
+        reply = self.call("getNextFormHandHeld", {"_xml": xml, "_dataAreaId": company}, timeout)
         if not isinstance(reply, str):
             raise WhsError("bad_reply", "getNextFormHandHeld did not return a string")
         try:
@@ -196,7 +142,7 @@ class WhsClient:
     # --- sessions ----------------------------------------------------------
     def session(self, worker: str) -> WorkerSession:
         with self._lock:
-            found = self.sessions.get(worker.upper())
+            found = self.sessions.get(worker.strip().upper())
         if found is None:
             raise WhsError("no_session", f"worker {worker} is not logged in here; call whs_login first")
         return found
@@ -206,7 +152,7 @@ class WhsClient:
         company = (company or self.config.company).strip()
         if not company:
             raise WhsError("no_company", "no company: pass company to whs_login or set \"company\" in d365whsapp.json")
-        key = worker.upper()
+        key = worker.strip().upper()
         with self._lock:
             session = self.sessions.get(key)
             if session is None or session.company != company:
@@ -229,8 +175,11 @@ class WhsClient:
         login_page = self.exchange("", session.company)
         if not login_page.is_login:
             raise WhsError("unexpected_page", f"expected the login page, got {login_page.pattern}", login_page)
-        request = build_request(login_page, {"UserId": session.worker, "Password": password}, "Login",
-                                device_id=session.device_id)
+        try:
+            request = build_request(login_page, {"UserId": session.worker, "Password": password}, "Login",
+                                    device_id=session.device_id)
+        except ProtocolError as exc:
+            raise WhsError("refused", str(exc), login_page) from None
         page = self.exchange(request, session.company)
         if page.is_login:
             session.page = None
@@ -239,8 +188,10 @@ class WhsClient:
         session.page = page
         return page
 
-    def submit(self, worker: str, values: dict[str, str] | None, press: str | None) -> tuple[Page, bool]:
-        """One step. Returns the next page and whether it came from a recovery login."""
+    def submit(self, worker: str, values: dict[str, str] | None, press: str | None,
+               timeout: float | None = None) -> tuple[Page, bool]:
+        """One step. Returns the next page and whether it came from a recovery login.
+        `timeout`: this step's reply limit (a background run's step: the full step_timeout)."""
         session = self.session(worker)
         with session.lock:
             if session.page is None:
@@ -250,13 +201,20 @@ class WhsClient:
             except ProtocolError as exc:
                 raise WhsError("refused", str(exc), session.page) from None
             try:
-                page = self.exchange(request, session.company)
+                page = self.exchange(request, session.company, timeout)
             except WhsError as exc:
                 if exc.code == "REQUEST_XML_TAMPERING":
                     raise  # the session is intact; the current page still holds
                 if exc.code == SESSION_BUSY:
                     raise step_running() from None
-                if exc.code in ("timeout", "REQUEST_SESSION_TOKEN_ERROR", "MULTI_DEVICE_USER_LOGIN") and session.password:
+                if exc.code == "MULTI_DEVICE_USER_LOGIN":
+                    # another device (a person's handheld, another host) now holds this worker: never take it back
+                    with self._lock:
+                        if self.sessions.get(worker.strip().upper()) is session:
+                            self.sessions.pop(worker.strip().upper(), None)
+                    raise WhsError("session_taken", f"another device holds worker {worker}'s session; nothing was "
+                                   "retried. whs_login explicitly if this one should take it over") from None
+                if exc.code in ("timeout", "REQUEST_SESSION_TOKEN_ERROR") and session.password:
                     try:
                         page = self._login(session, session.password)
                     except WhsError as again:
@@ -268,26 +226,69 @@ class WhsClient:
             session.page = page
             if page.is_login:  # the server ended the session (log off, or an unreadable request)
                 with self._lock:
-                    self.sessions.pop(worker.upper(), None)
+                    self.sessions.pop(worker.strip().upper(), None)
             return page, False
 
+    def _logoff_names(self, company: str) -> tuple[str, ...]:
+        path = lookup_path(company)
+        deadline = time.monotonic() + LOOKUP_SECONDS
+        try:
+            token = self.data_tokens.get(deadline=deadline)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise LookupError("OData lookup deadline expired")
+            response = self.transport(
+                self.config.aos_url.rstrip("/") + path,
+                {"Authorization": f"Bearer {token}", "Accept": "application/json"}, None,
+                remaining, method="GET", max_bytes=MAX_BYTES,
+                allow_redirects=False)
+        except EntraError as error:
+            raise LookupError(f"Entra {error.code}") from None
+        except (OSError, TimeoutError):
+            raise LookupError("OData request failed or timed out") from None
+        return names_from_reply(response.status, response.text, response.truncated)
+
     def logoff(self, worker: str) -> Page | None:
-        """Cancel/Back to the main menu and press Log off. Ends the local session either way."""
+        """Cancel/Back to the main menu and press Log off. Ends the local session either way, except on
+        retry_later (the logoff names are still being looked up; nothing was pressed)."""
         session = self.session(worker)
         page = session.page
+        items = None
+        keep = False
+        last = None
         try:
             for _ in range(LOGOFF_STEPS_MAX):
                 if page is None or page.is_login:
                     return page
-                press = exit_button(view_of(page).buttons)
+                if items is None:
+                    try:
+                        items = self.logoff_items.get(session.company, worker, self._logoff_names)
+                    except LookupPending as pending:
+                        keep = True
+                        raise WhsError("retry_later", str(pending), page) from None
+                buttons = view_of(page).buttons
+                press = exit_button(buttons, items.names + tuple(self.logoff_items.buttons),
+                                    acknowledge=page.pattern not in ("Menu", "Login") and not page.inputs()
+                                    and "?" not in str(page.summary().get("title", "")) + str((page.message or {}).get("text", "")))
+                # never a menu entry, never the OK that answers a question ("Complete work?")
                 if press is None:
-                    raise WhsError("stuck", f"no Log off, Cancel or Back on page {page.pattern}; the server "
-                                   "session stays there and resumes at the next whs_login", page)
+                    raise WhsError("stuck", items.stuck(buttons, self.logoff_items.buttons) +
+                                   "; the server session stays there and resumes at the next whs_login", page)
+                seen = (page.pattern, page.step.get("id", ""), str(page.summary().get("title", "")), tuple(buttons), press)
+                if seen == last:  # the same button on the same page again: it does not lead out
+                    keep = True
+                    raise WhsError("stuck", f"{press!r} did not leave this page; not pressed again. " +
+                                   items.stuck(buttons, self.logoff_items.buttons) +
+                                   "; the session stays there", page)
+                last = seen
                 page, _ = self.submit(worker, None, press)
-            raise WhsError("stuck", f"not logged off after {LOGOFF_STEPS_MAX} steps", page)
+            raise WhsError("stuck", f"not logged off after {LOGOFF_STEPS_MAX} steps; " +
+                           items.stuck(view_of(page).buttons, self.logoff_items.buttons), page)
         finally:
-            with self._lock:
-                self.sessions.pop(worker.upper(), None)
+            if not keep:
+                with self._lock:
+                    if self.sessions.get(worker.strip().upper()) is session:  # not one a new whs_login made
+                        self.sessions.pop(worker.strip().upper(), None)
 
 
 def view_of(page: Page) -> View:

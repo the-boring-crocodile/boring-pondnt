@@ -12,7 +12,7 @@ import math
 import re
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from typing import Any
 
 from boring_service_kit.outcomes import Failed, Refused
@@ -90,6 +90,47 @@ def _first_line(error: BaseException) -> str:
     return text.splitlines()[0][:500]
 
 
+def read_rows(connect: Callable[[], Any], query: str, parameters: tuple[Any, ...],
+              deadline: float) -> Iterator[Any]:
+    """Stream raw rows from a fixed, parameterized read. The caller owns the SELECT and its row cap."""
+    try:
+        connection = connect()
+    except Exception as error:  # The driver's own exception types.
+        raise Failed("unavailable", f"cannot connect: {_first_line(error)}") from None
+    try:
+        if time.monotonic() >= deadline:
+            raise Refused("not_admitted", "the log query deadline passed before the SELECT")
+        cursor = connection.cursor()
+        cursor.execute(query, *parameters)
+        while time.monotonic() < deadline:
+            row = cursor.fetchone()
+            if row is None:
+                return
+            yield row
+        raise Failed("timeout", "the log query ran past its timeout")
+    except (Failed, Refused):
+        raise
+    except Exception as error:  # The driver's own exception types.
+        message = _first_line(error)
+        if "HYT00" in str(error) or "timeout" in message.lower():
+            raise Failed("timeout", "the log query ran past its timeout") from None
+        raise Failed("sql_error", message) from None
+    finally:
+        try:
+            connection.close()
+        except Exception:
+            pass
+
+
+def _rollback(connection: Any) -> bool:
+    """Roll back; False when that failed too (a broken connection): the caller reports the real error."""
+    try:
+        connection.rollback()
+        return True
+    except Exception:  # noqa: BLE001 -- the driver's own exception types
+        return False
+
+
 def execute(connect: Callable[[], Any], script: str, max_rows: int = ROWS_DEFAULT,
             atomic: bool = False, deadline: float | None = None) -> dict[str, Any]:
     """Run a script batch by batch. Each result set comes back as columns and up to `max_rows` rows;
@@ -119,18 +160,26 @@ def execute(connect: Callable[[], Any], script: str, max_rows: int = ROWS_DEFAUL
                 connection.autocommit = False  # pyodbc; sqlite3 (the tests) opens a transaction itself
             except AttributeError:
                 pass
+        configured = getattr(connection, "timeout", 0) or 0  # the connector's per-query timeout (0: none)
         cursor = connection.cursor()
         for number, batch in enumerate(parts, start=1):
             if deadline is not None and time.monotonic() >= deadline:  # last point before it runs
-                if atomic:
-                    connection.rollback()
+                rolled_back = _rollback(connection) if atomic else False
                 if done == 0:
                     raise Refused("not_admitted", "the script's timeout passed before its first batch; "
                                   "nothing ran", batches=len(parts))
                 raise Failed("timeout", f"the script's timeout passed before batch {number}; "
                              f"batches 1-{done} ran, the rest was not started",
                              batch=number, batches=len(parts), batches_done=done,
-                             rolled_back=atomic, results=results[-5:])
+                             rolled_back=rolled_back, **({"rollback_failed": True} if atomic and not rolled_back else {}),
+                             results=results[-5:])
+            if deadline is not None:  # a batch gets what is left of the script's time, not all of it again
+                left = max(1, int(deadline - time.monotonic()))
+                try:
+                    connection.timeout = min(configured, left) if configured else left
+                    cursor = connection.cursor()  # pyodbc takes the timeout when a cursor is made
+                except (AttributeError, TypeError):
+                    pass
             try:
                 cursor.execute(batch)
                 while True:
@@ -143,7 +192,8 @@ def execute(connect: Callable[[], Any], script: str, max_rows: int = ROWS_DEFAUL
                                             "shown": len(rows), "truncated": len(fetched) > max_rows})
                     elif cursor.rowcount is not None and cursor.rowcount >= 0 and len(results) < RESULT_SETS_MAX:
                         results.append({"batch": number, "rows_changed": cursor.rowcount})
-                    messages += [clean(str(m[1])) for m in getattr(cursor, "messages", None) or []]
+                    if len(messages) < 50:  # a PRINT loop must not grow without bound
+                        messages += [clean(str(m[1])) for m in getattr(cursor, "messages", None) or []][:50 - len(messages)]
                     nextset = getattr(cursor, "nextset", None)
                     if nextset is None or not nextset():
                         break
@@ -153,13 +203,14 @@ def execute(connect: Callable[[], Any], script: str, max_rows: int = ROWS_DEFAUL
                 done = number
             except Exception as error:  # noqa: BLE001
                 message = _first_line(error)
-                if atomic:
-                    connection.rollback()
+                rolled_back = _rollback(connection) if atomic else False
                 timed_out = "HYT00" in str(error) or "timeout" in message.lower()
                 raise Failed("timeout" if timed_out else "sql_error",
                              ("the query ran past its timeout and was stopped" if timed_out else message),
                              batch=number, batches=len(parts), batches_done=done,
-                             rolled_back=atomic, results=results[-5:]) from None
+                             rolled_back=rolled_back if atomic else False,
+                             **({"rollback_failed": True} if atomic and not rolled_back else {}),
+                             results=results[-5:]) from None
         if atomic:
             connection.commit()
     finally:

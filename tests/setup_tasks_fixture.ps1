@@ -7,7 +7,7 @@ if ($errors.Count) { throw ($errors | Out-String) }
 # Import only named function definitions. Never execute setup's top-level statements.
 $names = @('Quote','Service-ProcessCommand','Service-TaskCommand','Owned-TaskPython',
            'Read-ServiceTask','Checked-ServiceTask','Service-Processes','Stop-ServiceProcesses',
-           'Current-User','Service-UserArguments','Owned-UserTaskPython')
+           'Current-User','Service-UserArguments','Owned-UserTaskPython','Say-Handbook')
 foreach ($name in $names) {
     $found = @($ast.FindAll({ param($node)
         $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name
@@ -117,6 +117,15 @@ function Core-Task {
     }
 }
 if ((Owned-TaskPython $core (Core-Task)) -cne $pythonw) { throw 'Core task not recognized' }
+# Stable and rc install folder names are ownership-neutral for SYSTEM and logon tasks.
+$originalPython = $python; $originalPythonw = $pythonw
+foreach ($folder in @('C:\tools\boring-pondnt-0.2.9-win-x64', 'C:\tools\pondnt-0.2.10-rc1', 'C:\tools\pondnt-0.2.10-rc6')) {
+    $python = "$folder\python\python.exe"
+    $pythonw = "$folder\python\pythonw.exe"
+    if ((Owned-TaskPython $item (Fixture-Task)) -cne $python) { throw 'Release SYSTEM task not recognized' }
+    if ((Owned-TaskPython $core (Core-Task)) -cne $pythonw) { throw 'Release logon task not recognized' }
+}
+$python = $originalPython; $pythonw = $originalPythonw
 # A core task from before the handbook (--kit) is not this release's: retained for review.
 $t = Core-Task; $t.Actions[0].Arguments = $coreArgs + ' "--kit" "C:\fixture\kit"'
 if (Owned-TaskPython $core $t) { throw 'Pre-handbook core task accepted' }
@@ -164,4 +173,24 @@ $Gateway = 'all'; $script:planned = @()
 $null = Services-Plan $cfg; $null = Services-Plan $cfg -Remove; $null = Services-Plan $cfg -Apply -Finalize; $null = Services-Plan $cfg -Apply
 $gated = $script:planned | ForEach-Object { [string]([array]::IndexOf(@($_), '--gateway') -ge 0) }
 if (($gated -join '|') -cne 'True|False|False|True') { throw "Gateway passed wrong: $($gated -join '|')" }
+function Say { param($Text, $Color) $Text }
+$kit = [pscustomobject]@{
+    state = 'kept'
+    folder = 'C:\fixture\handbook'
+    release = 'C:\release\handbook'
+    differs = @('persona.md')
+    new_pages = @('data.md')
+}
+$lines = @(Say-Handbook $kit)
+if (-not ($lines -match "differs from this release's handbook in: persona[.]md$")) { throw 'Missing changed-page report' }
+if (-not ($lines -match 'new in this release: data[.]md$')) { throw 'Missing new-page report' }
+if (-not ($lines -match "Ferry uses the release's copy.*Copy new pages into your handbook")) {
+    throw 'Missing Ferry fallback and owner-copy instructions'
+}
+$kit.differs = @()
+$lines = @(Say-Handbook $kit)
+if (($lines -match 'differs from|same as') -or -not ($lines -match 'new in this release: data[.]md$')) {
+    throw 'New-only handbook report is misleading'
+}
+
 Write-Output 'PASS: legacy ownership, customized task refusal, exact process selection; synthetic APIs only.'

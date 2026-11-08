@@ -123,6 +123,83 @@ def test_each_wheel_keeps_its_version_and_the_release_its_own(builder, tmp_path)
                                      ["boring_pondnt-0.1.10.dev7.dist-info"])
 
 
+@pytest.mark.parametrize("version,folder", [
+    ("0.2.10rc1", "pondnt-0.2.10-rc1"),
+    ("0.2.10rc6", "pondnt-0.2.10-rc6"),
+    ("0.2.10rc12", "pondnt-0.2.10-rc12"),
+    ("0.2.10", "boring-pondnt-0.2.10-win-x64"),
+])
+@pytest.mark.parametrize("with_tests", [False, True])
+def test_release_archive_preserves_candidate_version_and_install_folder(builder, tmp_path, version, folder, with_tests):
+    import json
+    import zipfile
+    module, _, _ = builder
+    name, install = module.release_layout(version, with_tests)
+    suffix = "-tests" if with_tests else ""
+    assert name == f"boring-pondnt-{version}-win-x64{suffix}"
+    assert install == folder + suffix
+    stage = tmp_path / install
+    stage.mkdir()
+    manifest = {"name": name, "boring-pondnt": version, "install_folder": install}
+    (stage / "MANIFEST.json").write_text(json.dumps(manifest))
+    archive = module.write_release_archive(stage, tmp_path, name)
+    assert archive.name == name + ".zip"
+    with zipfile.ZipFile(archive) as released:
+        assert released.namelist() == [install + "/MANIFEST.json"]
+        assert json.loads(released.read(install + "/MANIFEST.json")) == manifest
+    wheel = stage / f"boring_pondnt-{version}-py3-none-any.whl"
+    module.check_release_version(version, name, [wheel], [f"boring_pondnt-{version}.dist-info"])
+
+
+def test_release_archive_depends_on_names_and_contents_only(builder, tmp_path):
+    """Two builds of one commit: the same files, other mtimes and modes, the same zip."""
+    import os
+    import zipfile
+    module, _, _ = builder
+    archives = []
+    for run, (mtime, mode) in enumerate(((1_700_000_000, 0o644), (1_800_000_000, 0o600))):
+        stage = tmp_path / f"run{run}" / "pondnt-0.2.10"
+        (stage / "python").mkdir(parents=True)
+        for name, text in (("MANIFEST.json", "{}"), ("python/a.py", "print(1)")):
+            (stage / name).write_text(text)
+            (stage / name).chmod(mode)
+            os.utime(stage / name, (mtime, mtime))
+        archives.append(module.write_release_archive(stage, stage.parent, "release", (2026, 11, 7, 12, 0, 0)))
+    assert archives[0].read_bytes() == archives[1].read_bytes()
+    with zipfile.ZipFile(archives[0]) as released:
+        assert {entry.date_time for entry in released.infolist()} == {(2026, 11, 7, 12, 0, 0)}
+
+
+def test_uv_cache_info_goes_with_its_record_line(builder, tmp_path):
+    """uv's uv_cache.json carries the install's time; RECORD keeps every other line."""
+    module, _, _ = builder
+    info = tmp_path / "site-packages" / "boring_registry-0.7.12.dist-info"
+    info.mkdir(parents=True)
+    (info / "uv_cache.json").write_text('{"timestamp":{"secs_since_epoch":1}}')
+    (info / "RECORD").write_text("boring_registry/__init__.py,sha256=abc,10\n"
+                                 "boring_registry-0.7.12.dist-info/uv_cache.json,sha256=def,40\n"
+                                 "boring_registry-0.7.12.dist-info/RECORD,,\n")
+    other = tmp_path / "site-packages" / "anyio-4.15.1.dist-info"
+    other.mkdir()
+    (other / "RECORD").write_text("anyio/__init__.py,sha256=x,1\n")
+    assert module.drop_uv_cache_info(tmp_path / "site-packages") == ["boring_registry-0.7.12.dist-info"]
+    assert not (info / "uv_cache.json").exists()
+    assert (info / "RECORD").read_text() == ("boring_registry/__init__.py,sha256=abc,10\n"
+                                             "boring_registry-0.7.12.dist-info/RECORD,,\n")
+    assert (other / "RECORD").read_text() == "anyio/__init__.py,sha256=x,1\n"
+
+
+def test_source_wheel_and_server_agree_on_the_release_version(builder):
+    import re
+    from importlib.metadata import version
+    from boring_pondnt import __version__
+    from boring_pondnt.server import bootstrap_result
+    module, _, _ = builder
+    source = re.search(r'^version = "([^"]+)"', (ROOT / "pyproject.toml").read_text(), re.M)[1]
+    assert source == module.package_version() == __version__ == version("boring-pondnt")
+    assert bootstrap_result(None)["version"] == __version__
+
+
 def test_the_manifest_names_the_checked_app_version():
     """The manifest takes pondNT's version from the variable the check guards, nothing reassigns it."""
     import ast

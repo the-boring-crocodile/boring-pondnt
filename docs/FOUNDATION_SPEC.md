@@ -29,7 +29,8 @@ from what real use shows.
   patches name the hash they expect. `null` means "I believe it is absent":
   creating over an existing file is `stale`, like any other mismatch.
 - **Absolute paths.** No roots, no sandbox; no variable expansion in file
-  tools.
+  tools. Special paths are refused: network shares (UNC), device paths,
+  alternate data streams, device names (CON, NUL, COM1, ...).
 
 ## Tools
 
@@ -88,15 +89,16 @@ directory level, sorted case-insensitively: `name`, `type` (`file`, `dir`,
 `path` (file or tree), `query` (literal, one line), `glob`, `limit` (100, max
 500), `ignore_case`. Matches with path, line and a 200-character snippet;
 skips `.git`, `.vs`, `node_modules`, `__pycache__`, files over 16 MiB and
-non-text; stops after 20,000 files (`stopped: max_files`) or at the limit
-(`stopped: limit`). For small trees; the D365 source has
+non-text; stops after 20,000 files (`stopped: max_files`), at the limit
+(`stopped: limit`) or after 60 s, less behind a Pond's call budget
+(`stopped: time`, with a `note`); the matches found so far are returned. For small trees; the D365 source has
 Sourcecache (boring-sourcecache-d365).
 
 ### file_read_bytes, file_write_bytes
 
 Raw bytes as base64, at most 1 MiB per call, files up to 64 MiB. Read:
 `path`, `offset`, `length`; returns `data`, `size`, `eof` and the whole
-file's `sha256`. Write: `path`, `data`, `expected_sha256` (null creates),
+file's `sha256`, hashed in the same streaming pass that cuts the range. Write: `path`, `data`, `expected_sha256` (null creates),
 `offset` (null replaces the whole file; otherwise splices, may extend, never
 past the end).
 
@@ -143,8 +145,12 @@ against that tool's strict model and operation-owned stateless checks) before
 any runs; malformed options refuse the whole batch with nothing done. File
 existence, current hashes/contents and patch match checks happen when a step
 runs, since earlier steps can change them. This is not a transaction.
-The remaining batch time caps exec/job_wait admission; cleanup can extend the
-return time, and job_start retains its own background lifetime. A nonzero or
+`timeout_seconds` bounds the batch at step boundaries: no step starts once it
+has run out, and exec and job_wait steps get only the time that remains. The
+other steps (file reads, writes, patches, listings and searches, job_start and
+the other job calls) are not given the remaining time; each runs to its own
+limits once started. Cleanup can extend the return time, and job_start retains
+its own background lifetime. A nonzero or
 timed-out exec is a failed step and obeys on_error. Each result: `status` (`succeeded`, `refused`,
 `failed`, `not_started`), its `result`, `refusal` or `failed`, and
 `duration_ms`; plus `stop_reason`, `all_attempted`, `result_chars`,
@@ -154,7 +160,12 @@ result_limit`: every result is re-sent on every later turn. No rollback.
 
 ## Call log
 
-`calls.jsonl` in the state directory, one JSON line per call: `ts`, `tool`,
+`calls-<server>.jsonl` in the state directory (`calls-core.jsonl`,
+`calls-d365.jsonl`, `calls-d365web.jsonl`, `calls-d365data.jsonl`,
+`calls-d365whsapp.jsonl`; each server its own name, so a support bundle can
+collect several state folders into one flat folder; earlier builds' core
+wrote `calls.jsonl`, the bundled Knowledge's name, and leave that file
+where it was), one JSON line per call: `ts`, `tool`,
 `outcome` (`succeeded`, `refused`, `failed`, `error`), `code`, `ms`,
 `result_bytes` and `args`. It measures what the agent does (calls per task,
 bytes per result) and records what ran on an elevated machine, without
@@ -171,18 +182,27 @@ command or a SQL statement.
 - **Who can read it:** whoever can read the state directory, by default the
   installing person's `%LOCALAPPDATA%\boring-pondnt` for the core (its
   default state directory; `--state-dir` moves it), and administrators.
-- **How much stays:** the file is renamed to `calls.1.jsonl` once it passes
-  10 MiB, replacing the previous one; so at most two files, about 20 MiB.
-  That is a size rule, not a retention period, and not a hard cap: if the
-  rename fails (the old file open on Windows), writing goes on in the same
-  file.
+- **How much stays:** before an append, a file already larger than 10 MiB
+  is renamed to `calls-<server>.1.jsonl`, replacing the previous file. Normal
+  rotation keeps the current file and one previous file. This is neither
+  age-based retention nor a hard byte cap: an append can cross the threshold,
+  and a failed rename leaves writing in the same file.
+- **Access and completeness:** the logger creates no dedicated access-control
+  boundary; protect its state directory with the installation's Windows ACLs.
+  It is an operational record, not a tamper-proof audit trail or a complete
+  record of command arguments. A failed append can leave a gap.
 - On by default; `--no-call-log` switches it off. Writing it never breaks a
   tool.
 
-The call log is not the only record. Job output (`job_output`), the D365
-servers' own logs and step logs (D365WEB.md, D365WHSAPP.md) and each
-service's `service.log` hold what those tools produced, which can include
-data from the box; they follow their own pages' notes.
+The call log is not the only record. Job stdout/stderr and retained job
+results, each service's `service.log`, and browser/WHS scenario or step
+logs can contain source, records and business values. The argument-summary
+rule does not redact those stores or their exports. Pattern masking of
+diagnostics is not a general data-loss prevention boundary; d365data returns
+entity rows and action values unmasked. Apply separate access, backup and
+deletion policies to each store. See [browser tools](D365WEB.md),
+[warehouse step logs](D365WHSAPP.md#the-step-log) and
+[data handling](D365DATA.md).
 
 ## Self-check
 

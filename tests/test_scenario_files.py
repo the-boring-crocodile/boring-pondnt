@@ -7,10 +7,10 @@ from pathlib import Path
 import pytest
 
 HERE = Path(__file__).resolve().parent
-# The neutral example ships with the tests; a private checkout may keep its own scenario files in
-# pond/scenarios (never published), and they are checked the same way when present.
+# The neutral example ships with the tests; private scenario files kept beside this checkout in
+# ../boring-records/boring-pondnt/scenarios (never published) are checked the same way when present.
 SCENARIOS = (sorted(HERE.joinpath("scenarios").rglob("*.json"))
-             + sorted(HERE.parent.joinpath("pond", "scenarios").rglob("*.json")))
+             + sorted(HERE.parent.parent.joinpath("boring-records", "boring-pondnt", "scenarios").rglob("*.json")))
 VARIABLE = re.compile(r"\$\{(\w+)\}")
 
 

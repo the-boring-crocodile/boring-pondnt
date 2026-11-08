@@ -34,12 +34,77 @@ def test_launch_args_keep_a_visible_window_rendering(tmp_path):
     for args in (visible, headless):
         assert len([a for a in args if a.startswith("--disable-features=")]) == 1  # Chromium uses the last one
         assert "--remote-debugging-port=9333" in args and f"--user-data-dir={tmp_path}" in args
+        assert "--hide-crash-restore-bubble" in args
     assert "--disable-features=msEdgeSidebarV2,msUndersideButton,CalculateNativeWinOcclusion" in visible
     assert {"--disable-background-timer-throttling", "--disable-backgrounding-occluded-windows",
             "--disable-renderer-backgrounding"} <= set(visible)
     assert "--headless=new" not in visible
     assert "--headless=new" in headless and "--disable-features=msEdgeSidebarV2,msUndersideButton" in headless
     assert not any("backgrounding" in a for a in headless)
+
+
+@pytest.mark.parametrize("command,mode", [
+    ('"C:\\Program Files\\Edge\\msedge.exe" --headless=new --remote-debugging-port=9333', True),
+    ('"C:\\Program Files\\Edge\\msedge.exe" --remote-debugging-port=9333', False),
+    ('msedge --headless --user-data-dir="/folder/with --headless=new in its name"', True),
+    ('msedge --user-data-dir="/folder/with --headless=new in its name"', False),
+    ("", None),
+])
+def test_attach_reads_browser_mode_from_command_line(tmp_path, monkeypatch, command, mode):
+    from boring_pondnt import d365web_browser
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+    response = MagicMock()
+    response.__enter__.return_value.read.return_value = b'{"webSocketDebuggerUrl":"ws://127.0.0.1:9333/devtools/browser/test"}'
+    monkeypatch.setattr(d365web_browser.urllib.request, "urlopen", lambda *a, **kw: response)
+    conn = SimpleNamespace(send=lambda method: {"commandLine": command})
+    monkeypatch.setattr(d365web_browser, "Connection", lambda *a: conn)
+    profile = "/folder/with --headless=new in its name" if "user-data-dir" in command else tmp_path
+    attached = Browser.attach(9333, profile)
+    assert attached.headless is mode
+
+
+def test_attach_refuses_an_edge_with_another_profile(tmp_path, monkeypatch):
+    # someone's own Edge on the port: never driven, never closed by the idle close
+    from boring_pondnt import d365web_browser
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+    response = MagicMock()
+    response.__enter__.return_value.read.return_value = b'{"webSocketDebuggerUrl":"ws://127.0.0.1:9333/devtools/browser/test"}'
+    monkeypatch.setattr(d365web_browser.urllib.request, "urlopen", lambda *a, **kw: response)
+    closed = []
+    conn = SimpleNamespace(send=lambda method: {"commandLine": 'msedge --user-data-dir="C:/Users/me/Edge"'},
+                           close=lambda: closed.append(True))
+    monkeypatch.setattr(d365web_browser, "Connection", lambda *a: conn)
+    with pytest.raises(d365web_browser.BrowserError) as caught:
+        Browser.attach(9333, tmp_path)
+    assert caught.value.code == "foreign" and closed == [True]
+
+
+@pytest.mark.parametrize("configured,actual,key", [(False, True, "browser_mode_mismatch"),
+                                                  (True, False, "browser_mode_mismatch"),
+                                                  (True, None, "browser_mode_unknown"),
+                                                  (True, True, None)])
+def test_browser_mode_report_is_shared_with_form_mode(monkeypatch, configured, actual, key):
+    from types import SimpleNamespace
+    from boring_pondnt.d365whsapp_backends import FormBackend
+    from boring_pondnt.d365web_whsform import public
+    web = WebClient(Config(url="https://example.test", headless=configured))
+    web.browser = SimpleNamespace(headless=actual, conn=SimpleNamespace(closed=False))
+    monkeypatch.setattr(web, "_ensure", lambda: SimpleNamespace(url=lambda: "https://example.test/"))
+    monkeypatch.setattr(web, "_js", lambda op, *a: {"controls": [], "caption": "Menu"} if op == "whsform" else {})
+    backend = object.__new__(FormBackend)
+    backend.web = web
+    try:
+        state = web._state()
+        form = public(backend._page())
+        assert set(state) & {"browser_mode_mismatch", "browser_mode_unknown"} == ({key} if key else set())
+        assert set(form) & {"browser_mode_mismatch", "browser_mode_unknown"} == ({key} if key else set())
+        if key:
+            assert state[key] == form[key]
+    finally:
+        web.browser = None
+        web.shutdown()
 
 
 def test_field_keys_and_booleans():
@@ -58,6 +123,33 @@ def test_values_keep_their_order():
     for bad in ([], {}, [["a"]], [[1, 2]], "a=b"):
         with pytest.raises(D365WebError):
             normalize_values(bad)
+
+
+@pytest.mark.parametrize("name,password_control,readback", [
+    ("Password", False, ""), ("WorkerPin", False, "**********"),
+    ("LoginCode", True, ""), ("LoginCode", True, "typed-secret"),
+])
+def test_secret_fields_mask_applied_and_skip_readback(tmp_path, monkeypatch, name, password_control, readback):
+    web = WebClient(Config(url="https://example.test", backend="input"))  # the input path's readback rules
+    page = type("Page", (), {"click": lambda *a: None, "key": lambda *a: None,
+                             "type_text": lambda *a: None})()
+    monkeypatch.setattr(web, "_ensure", lambda: page)
+    found = {"control": name, "x": 1, "y": 1, "password": password_control}
+    monkeypatch.setattr(web, "_locate", lambda *a: found)
+    monkeypatch.setattr(web, "_wait_idle", lambda: True)
+    monkeypatch.setattr(web, "_js", lambda op, *a: {"value": readback} if op == "locate" else [])
+    monkeypatch.setattr(web, "_after_step", lambda before, **kw: kw)
+    monkeypatch.setattr(time, "sleep", lambda *a: None)
+    try:
+        from boring_pondnt.d365web_server import create_server
+        from test_d365web_server import call
+        server = create_server(web, state_dir=tmp_path, log_calls=True)
+        error, result = call(server, "web_set", {"values": [{"field": name, "value": "typed-secret"}]})
+        assert not error, result
+        assert result["applied"] == [{"field": name, "value": "***", "now": "***"}]
+        assert "typed-secret" not in (tmp_path / "calls-d365web.jsonl").read_text()
+    finally:
+        web.shutdown()
 
 
 def test_value_differs_allows_d365_formatting():
@@ -204,14 +296,55 @@ def site():
     server.shutdown()
 
 
-@pytest.fixture
-def client(site, tmp_path):
+def _fake_client(site, tmp_path, backend):
     def launch(config):
         args = ("--no-sandbox",) if hasattr(os, "geteuid") and os.geteuid() == 0 else ()
         return Browser.launch(tmp_path / "profile", headless=True, edge=BROWSER, extra_args=args)
-    web = WebClient(Config(url=site, step_timeout=10), browser_factory=launch, budget=20, state_dir=tmp_path)
+    return WebClient(Config(url=site, step_timeout=10, backend=backend), browser_factory=launch, budget=20,
+                     state_dir=tmp_path)
+
+
+@pytest.fixture
+def client(site, tmp_path):
+    # The fake page has no D365 viewmodels: these tests pin the input path and its exact answers.
+    # The model backend is checked against a real D365 on a dev box.
+    web = _fake_client(site, tmp_path, "input")
     yield web
     web.shutdown()
+
+
+@pytest.fixture
+def model_client(site, tmp_path):
+    web = _fake_client(site, tmp_path, "model")
+    yield web
+    web.shutdown()
+
+
+@needs_browser
+def test_secret_state_fields_and_grid_cells(client):
+    client.open("PurchTableListPage")
+    def add_controls():
+        page = client._ensure()
+        page.evaluate("""(() => {
+            const form = document.querySelector('[data-dyn-form-name=PurchTable]');
+            const fields = document.createElement('div');
+            // Explicit sizes: the fixture form's layout gives appended blocks no box, and a control
+            // without a box is invisible to the client, which would make the assertions below vacuous.
+            fields.style.cssText = 'display:block;width:600px';
+            fields.innerHTML = '<div style="display:block;width:300px;height:24px" data-dyn-role="Input" data-dyn-controlname="AccessCode"><input type="password" value="type-secret"></div>' +
+                '<div style="display:block;width:300px;height:24px" data-dyn-role="Input" data-dyn-controlname="ConnectionPassword"><input value="name-secret"></div>' +
+                '<div style="display:block;width:400px;height:60px" role="grid" data-dyn-role="Grid" data-dyn-controlname="SecretGrid">' +
+                '<div role="row"><div role="columnheader" data-dyn-controlname="Password">Password</div></div>' +
+                '<div role="row"><div role="gridcell"><div data-dyn-controlname="Password"><input value="grid-secret"></div></div></div></div>';
+            form.prepend(fields);
+        })()""")
+    client.call("fixture", add_controls)
+    for full in (False, True):
+        state = client.state(full=full)
+        text = json.dumps(state)
+        assert "AccessCode" in text and "ConnectionPassword" in text  # the controls were read
+        assert all(value not in text for value in ("type-secret", "name-secret", "grid-secret"))
+    assert "grid-secret" not in json.dumps(client.grid("SecretGrid"))
 
 
 @needs_browser
@@ -284,6 +417,126 @@ def test_dialog_scope_and_lookup(client):
     state = client.lookup("OrderAccount", pick="1003")  # not in view: typed to filter
     assert state["scope"] == "form" and state["fields"]["OrderAccount"] == "1003"
     assert state["readonly"]["VendorName"] == "Ade Supply Company"
+
+
+@needs_browser
+def test_press_and_select_row_say_what_moved(client):
+    """The page library's context: a dialog that opens or closes, a press that moves nothing, the grid
+    viewmodel's active row (stood in for here by a $dyn.context that follows aria-selected)."""
+    client.open("PurchTableListPage")
+    state = client.press("New")
+    assert state["changed"][:2] == ["form", "dialog"] and "unchanged" not in state
+    state = client.press("Cancel")
+    assert "dialog" in state["changed"]
+    client.call("stand-ins", lambda: client._ensure().evaluate("""(() => {
+        const form = document.querySelector('[data-dyn-form-name=PurchTable]');
+        const quiet = document.createElement('div');
+        quiet.setAttribute('data-dyn-controlname', 'QuietButton'); quiet.setAttribute('data-dyn-role', 'CommandButton');
+        quiet.innerHTML = '<button type="button">Quiet</button>';
+        form.insertBefore(quiet, form.querySelector('#lines'));
+        const grid = () => document.getElementById('lines');
+        const model = {getActiveRowAriaNumber: () => { const r = grid().querySelector('[aria-selected=true]');
+                         return r ? Number(r.getAttribute('aria-rowindex')) : 2; }};
+        model.ActiveRowTrackingId = () => String(model.getActiveRowAriaNumber());
+        window.$dyn.context = (e) => { if (e === grid()) return model; throw new Error('none'); };
+        window.$dyn.isObservable = (v) => typeof v === 'function' && v === model.ActiveRowTrackingId;
+        window.$dyn.peek = (v) => v();
+    })()"""))
+    state = client.press("QuietButton")
+    assert state["unchanged"] is True and "inspect" in state["note"] and state["pressed"] == "QuietButton"
+    state = client.select_row("LineSpec", match={"Item": "A0002"})
+    assert state["selected"] == {"grid": "LineSpec", "row": 1}
+    assert state["active"]["key"] == "3" and state["active"]["values"] == ["2", "A0002", "7"]
+    assert state["changed"] == ["record"] and "active_differs" not in state
+    state = client.select_row("LineSpec", match={"Item": "A0002"})
+    assert state["unchanged"] is True and "already the active record" in state["note"]
+
+
+TREE_MARKUP = """(() => {
+    // D365's tree markup (10.0.49): li[role=treeitem] with data-dyn-id, aria-level/-expanded/-selected, a
+    // header with an expand button, a checkbox and the label span; children render once expanded
+    const form = document.querySelector('[data-dyn-form-name=PurchTable]');
+    const t = document.createElement('div');
+    t.setAttribute('data-dyn-controlname', 'TreeKeys'); t.setAttribute('data-dyn-role', 'Tree');
+    t.style.cssText = 'position:absolute;left:20px;top:420px;width:300px';
+    const node = (id, label, level, kids) => `<li role="treeitem" data-dyn-id="${id}" aria-level="${level}" aria-selected="false"` +
+      (kids ? ` aria-expanded="false"` : '') + ` aria-label="${label} mixed"><div class="treeView-treeItem-header">` +
+      `<button type="button" class="treeView-treeExpandCollapse" style="width:12px;height:12px"></button>` +
+      `<span role="checkbox" class="treeView-checkbox"></span><span class="treeView-treeItemLabel">${label}</span></div>` +
+      (kids ? `<ul style="display:none">${kids}</ul>` : '') + `</li>`;
+    t.innerHTML = '<ul role="tree">' + node(5, 'Activity', 1) + node(28, 'Bank', 1, node(29, 'Cheques', 2) + node(30, 'Fees', 2)) + '</ul>';
+    form.appendChild(t);
+    t.addEventListener('click', (ev) => {
+      const li = ev.target.closest('li');
+      if (ev.target.closest('.treeView-checkbox')) { window.checked = true; return; }
+      if (ev.target.closest('button')) {
+        const open = li.getAttribute('aria-expanded') !== 'true';
+        li.setAttribute('aria-expanded', String(open)); li.querySelector('ul').style.display = open ? '' : 'none';
+        return;
+      }
+      t.querySelectorAll('li').forEach(x => x.setAttribute('aria-selected', 'false'));
+      li.setAttribute('aria-selected', 'true');
+    });
+})()"""
+
+
+@needs_browser
+def test_tree_nodes_are_read_and_selected_by_path(client):
+    client.open("PurchTableListPage")
+    client.call("tree", lambda: client._ensure().evaluate(TREE_MARKUP))
+    state = client.state()
+    assert state["trees"] == [{"name": "TreeKeys", "nodes": [
+        {"label": "Activity", "level": 1}, {"label": "Bank", "level": 1, "expanded": False}]}]
+    state = client.tree(["Bank", "Fees"])
+    assert state["tree"] == {"name": "TreeKeys", "selected": ["Bank", "Fees"]}
+    assert state["trees"][0]["nodes"][1:] == [{"label": "Bank", "level": 1, "expanded": True},
+                                             {"label": "Cheques", "level": 2}, {"label": "Fees", "level": 2, "selected": True}]
+    assert "record" in state["changed"] and "pane" in state["changed"]
+    with pytest.raises(D365WebError) as error:
+        client.tree(["Bank", "Loans"])
+    assert error.value.code == "not_found" and error.value.details["options"] == ["Cheques", "Fees"]
+    assert client.tree(["Bank", "Fees"])["unchanged"] is True
+    assert client.call("checked", lambda: client._ensure().evaluate("!!window.checked")) is False
+
+
+@needs_browser
+def test_a_reference_group_names_its_fields_and_is_not_clicked(client):
+    client.open("PurchTableListPage")
+    client.call("group", lambda: client._ensure().evaluate("""(() => {
+        const form = document.querySelector('[data-dyn-form-name=PurchTable]');
+        const g = document.createElement('div');
+        g.setAttribute('data-dyn-controlname', 'Worker'); g.setAttribute('data-dyn-role', 'ReferenceGroup');
+        g.innerHTML = '<label>Worker</label><div data-dyn-controlname="Worker_Name" data-dyn-role="Input"><input value="Julia" ' +
+          'onclick="window.clicked = true"></div>';
+        form.insertBefore(g, form.querySelector('#lines'));
+    })()"""))
+    assert client.state()["fields"]["Worker_Name"] == "Julia"
+    with pytest.raises(D365WebError) as error:
+        client.set({"Worker": "Lars"})
+    assert error.value.code == "refused" and error.value.details["parts"] == ["Worker_Name"]
+    assert client.call("clicked", lambda: client._ensure().evaluate("!!window.clicked")) is False
+
+
+@needs_browser
+def test_a_file_upload_is_listed_and_refused(client):
+    client.open("PurchTableListPage")
+    client.call("upload", lambda: client._ensure().evaluate("""(() => {
+        // D365's \"Upload document\" dialog: a DocumentUpload control with Browse over input[type=file], and Cancel
+        const d = document.createElement('div');
+        d.className = 'dialog'; d.setAttribute('role', 'dialog'); d.setAttribute('data-dyn-form-name', 'DocumentUpload');
+        d.innerHTML = '<div data-dyn-controlname="UploadControl" data-dyn-role="DocumentUpload">' +
+          '<input type="file" style="display:none"><div data-dyn-controlname="UploadControlBrowseButton" data-dyn-role="Button">' +
+          '<button type="button" onclick="window.browsed = true">Browse</button></div></div>' +
+          '<div data-dyn-controlname="Cancel" data-dyn-role="CommandButton"><button type="button" onclick="document.querySelector(&quot;.dialog&quot;).remove()">Cancel</button></div>';
+        document.body.appendChild(d);
+    })()"""))
+    state = client.state()
+    assert state["scope"] == "dialog" and state["uploads"] == ["UploadControl"]
+    with pytest.raises(D365WebError) as error:
+        client.press("Browse")
+    assert error.value.code == "refused" and error.value.details["upload"] == "UploadControl"
+    assert client.call("browsed", lambda: client._ensure().evaluate("!!window.browsed")) is False
+    assert client.press("Cancel")["scope"] == "form"
 
 
 @needs_browser
@@ -660,6 +913,27 @@ def test_substitute_check_steps_and_variables():
     assert extract_variable(state, "field:Missing") is None
 
 
+def test_scenario_save_searches_second_grid_and_honours_explicit_grid():
+    from boring_pondnt.d365web_client import extract_variable, _check_web_save
+    state = {"grids": [
+        {"name": "Workers", "columns": [{"name": "PersonnelNumber", "label": "Personnel number"}],
+         "rows": [{"values": ["000123"]}]},
+        {"name": "WorkUsers", "columns": [{"name": "WorkUser", "label": "Work user"}],
+         "rows": [{"values": ["ZZS03A"]}, {"values": ["ZZS03B"]}]},
+    ]}
+    for column in ("WorkUser", "work user"):
+        assert extract_variable(state, "grid:" + column) == "ZZS03A"
+        assert extract_variable(state, {"from": "grid:" + column, "row": 1}) == "ZZS03B"
+    assert extract_variable(state, {"from": "grid:WorkUser", "grid": "Workers"}) is None
+    assert extract_variable(state, {"from": "grid:WorkUser", "grid": "WorkUsers",
+                                    "regex": r"ZZS(.*)", "row": 1}) == "03B"
+    assert extract_variable(state, {"from": "grid:WorkUser", "row": 10}) is None
+    _check_web_save({"worker": {"from": "grid:WorkUser", "grid": "WorkUsers", "row": 1}})
+    state["grids"].insert(0, {"name": "First", "columns": [{"name": "WorkUser"}],
+                             "rows": [{"values": ["FIRST"]}]})
+    assert extract_variable(state, "grid:WorkUser") == "FIRST"
+
+
 @needs_browser
 def test_scenario_runs_expects_and_saves(client):
     steps = [
@@ -844,3 +1118,62 @@ def test_select_row_and_expect_search_beyond_the_rendered_rows(client):
     lines = result["steps"]
     assert "mismatch" not in lines[0]
     assert any("searched 40 rows" in m for m in lines[1]["mismatch"])
+
+
+@needs_browser
+def test_model_backend_without_viewmodels_falls_back_per_step(model_client):
+    """A page without D365 viewmodels (this fake): every set and press runs the input path and says so;
+    a grid read never pages with the keyboard and reports the rows it could not load instead."""
+    model_client.open("PurchTableListPage")
+    state = model_client.set([["Unitization", "None"]])
+    assert state["applied"] == [{"field": "Unitization", "value": "None", "via": "input", "now": "None"}]
+    with pytest.raises(D365WebError) as error:
+        model_client.set({"Unitization": "Pallets"})
+    assert error.value.code == "refused"
+    model_client.open("DemoKeyLog")
+    grid = model_client.grid("KeyGrid", max_rows=50, all_rows=True)
+    assert len(grid["rows"]) == 30 and grid["more"] is True  # 45 exist: say so, never press PageDown
+
+
+@pytest.mark.parametrize("form", ['--user-data-dir="{p}"', '"--user-data-dir={p}"', "--user-data-dir={p}/",
+                                  "--user-data-dir={P}"])
+def test_attach_accepts_our_own_edge_however_its_profile_is_written(tmp_path, monkeypatch, form):
+    from boring_pondnt import d365web_browser
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+    response = MagicMock()
+    response.__enter__.return_value.read.return_value = b'{"webSocketDebuggerUrl":"ws://127.0.0.1:9333/devtools/browser/test"}'
+    monkeypatch.setattr(d365web_browser.urllib.request, "urlopen", lambda *a, **kw: response)
+    profile = tmp_path / "prof ile"
+    profile.mkdir()
+    text = form.format(p=profile, P=str(profile) if os.name != "nt" else str(profile).upper())
+    conn = SimpleNamespace(send=lambda method: {"commandLine": "msedge " + text}, close=lambda: None)
+    monkeypatch.setattr(d365web_browser, "Connection", lambda *a: conn)
+    Browser.attach(9333, profile)  # no foreign refusal
+
+
+def test_an_apostrophe_in_the_command_line_does_not_skip_the_profile_check(tmp_path, monkeypatch):
+    from boring_pondnt import d365web_browser
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+    response = MagicMock()
+    response.__enter__.return_value.read.return_value = b'{"webSocketDebuggerUrl":"ws://127.0.0.1:9333/devtools/browser/test"}'
+    monkeypatch.setattr(d365web_browser.urllib.request, "urlopen", lambda *a, **kw: response)
+    conn = SimpleNamespace(send=lambda method: {"commandLine": "msedge --user-data-dir=C:/Users/O'Brien/Edge"},
+                           close=lambda: None)
+    monkeypatch.setattr(d365web_browser, "Connection", lambda *a: conn)
+    with pytest.raises(d365web_browser.BrowserError):
+        Browser.attach(9333, tmp_path)
+
+
+def test_a_foreign_edge_on_the_configured_port_is_never_replaced_by_a_launch(tmp_path, monkeypatch):
+    from boring_pondnt import d365web_browser
+    web = WebClient(Config(url="https://example.test", debug_port=9333, profiles_dir=str(tmp_path)))
+    def foreign(port, profile):
+        raise d365web_browser.BrowserError("foreign", "another profile")
+    monkeypatch.setattr(Browser, "attach", staticmethod(foreign))
+    monkeypatch.setattr(Browser, "launch", staticmethod(lambda *a, **k: pytest.fail("launched")))
+    with pytest.raises(D365WebError) as caught:
+        web._connect()
+    assert "debugging port 9333" in caught.value.message
+    web.shutdown()

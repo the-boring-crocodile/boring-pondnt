@@ -72,8 +72,8 @@ The saving depends on the client's discovery and caching behaviour and the
 task. This asks the model to take an extra discovery step;
 [direct connections remain available](docs/INSTALL.md#the-short-way-setupps1).
 
-Use `setup.ps1 -Gateway all` to choose this layout. Browser and warehouse
-servers remain opt-in: the flag routes selected services, it does not select
+Use `setup.ps1 -Gateway all` to choose this layout. Browser, warehouse and
+data servers remain opt-in: the flag routes selected services, it does not select
 or configure every optional service. Each server still runs separately on
 127.0.0.1 with its own access key. **Ferry forwards calls; it does not host
 or start the backend processes.** Setup creates the keys and scheduled tasks.
@@ -87,6 +87,7 @@ installation created by `setup.ps1`**:
 | boring-pondnt-d365 | 18514 | Build, sync, SQL, xref | you, elevated | at logon |
 | boring-pondnt-d365web | 18516 | D365 browser forms | you, elevated | at logon |
 | boring-pondnt-d365whsapp | 18515 | Warehouse app protocol or form simulator | you, elevated | at logon |
+| boring-pondnt-d365data | 18518 | OData and DMF packages | you, elevated | at logon |
 | Ferry (recommended) | 18517 | Discover and call the configured backends | SYSTEM | at boot |
 | Sourcecache | 18501 | D365 source, elements, labels | SYSTEM | at boot |
 | Knowledge | 18512 | Notes the agents keep | SYSTEM | at boot |
@@ -104,8 +105,8 @@ and Ferry routing are independent of how the processes are started. The
 release's standard installer manages scheduled tasks; a custom manual launcher
 has its own startup and recovery arrangements.
 
-The optional Pond tunnel uses 18520 (core), 18522 (D365), 18524 (warehouse)
-and 18526 (browser).
+The optional Pond tunnel uses 18520 (core), 18522 (D365), 18524 (warehouse),
+18526 (browser) and 18528 (OData/DMF).
 
 **Target:** a rebuildable Azure VM (Windows Server, D8v5) with a Dynamics 365
 Supply Chain Management development environment; Copilot in Visual Studio on
@@ -113,7 +114,7 @@ the same host is the client.
 
 ## Shape
 
-Four pondNT servers plus Sourcecache, Knowledge and Canvas, with Ferry
+Five pondNT servers plus Sourcecache, Knowledge and Canvas, with Ferry
 recommended in front of the selected backends except core and Knowledge. Each server keeps its own process and access
 key. The general services can instead run elsewhere over HTTPS with OAuth;
 the pondNT servers can also be reached by a Pond through a tunnel.
@@ -134,6 +135,10 @@ the pondNT servers can also be reached by a Pond through a tunnel.
   browser form simulator (`form`); the result identifies the mode and what it
   could not check. See [browser tools](docs/D365WEB.md) and
   [warehouse tools](docs/D365WHSAPP.md).
+- **`boring-pondnt-d365data`** (opt-in): public OData entities and DMF packages:
+  `odata_entities`, `odata_query`, `odata_write`, `odata_action`, `dmf_export`,
+  `dmf_import` and `dmf_status`. Its own Entra app and limited D365 user;
+  configure and select it as [D365DATA.md](docs/D365DATA.md#install) describes.
 - **`boring-sourcecache-d365`** (boring-services): full-text source search,
   elements and labels over immutable snapshots. Knowledge and Canvas are
   also independent services; configure each directly:

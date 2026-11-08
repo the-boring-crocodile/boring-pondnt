@@ -2,6 +2,8 @@
 import json
 from pathlib import Path
 
+import pytest
+
 from boring_pondnt.server import bootstrap_result
 from boring_pondnt.setup_services import SERVICES, plan, uninstall
 
@@ -36,10 +38,28 @@ def test_a_later_release_never_overwrites_the_kit_and_reports_the_differences(tm
     (state / "handbook" / "persona.md").write_text("Fitzwilliam, as the owner adapted him\n", encoding="utf-8")
     (state / "handbook" / "project.md").write_text("our notes\n", encoding="utf-8")
     newer = release(tmp_path, "rc21", persona="Fitzwilliam, revised upstream")
+    (newer / "handbook" / "data.md").write_text("# Data guide\n", encoding="utf-8")
     result = setup(newer, state)
     assert result["handbook"]["state"] == "kept" and "seeded" not in result["handbook"]
     assert result["handbook"]["differs"] == ["persona.md", "project.md"]
+    assert result["handbook"]["new_pages"] == ["data.md"]
+    assert not (state / "handbook" / "data.md").exists()
     assert (state / "handbook" / "persona.md").read_text(encoding="utf-8") == "Fitzwilliam, as the owner adapted him\n"
+
+
+@pytest.mark.parametrize("candidate_name", ["pondnt-0.2.10-rc1", "pondnt-0.2.10-rc6"])
+def test_candidate_folder_and_version_do_not_change_the_d32_content_comparison(tmp_path, candidate_name):
+    state = tmp_path / "state"
+    stable = release(tmp_path, "boring-pondnt-0.2.9-win-x64")
+    setup(stable, state)
+    candidate = release(tmp_path, candidate_name)
+    unchanged = setup(candidate, state)
+    assert unchanged["handbook"]["state"] == "kept"
+    assert unchanged["handbook"]["differs"] == []
+    (candidate / "handbook/bootstrap.md").write_text("# revised candidate agreement")
+    changed = setup(candidate, state)
+    assert changed["handbook"]["differs"] == ["bootstrap.md"]
+    assert (state / "handbook/bootstrap.md").read_text() == "# bootstrap\n"
 
 
 def test_a_kit_folder_without_bootstrap_is_left_alone_and_reported(tmp_path):

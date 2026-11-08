@@ -19,6 +19,8 @@ import json
 import os
 import queue
 import secrets
+import re
+import shlex
 import socket
 import struct
 import subprocess
@@ -191,7 +193,13 @@ class Connection:
         message: dict[str, Any] = {"id": ident, "method": method, "params": params or {}}
         if session:
             message["sessionId"] = session
-        self.ws.send(json.dumps(message))
+        try:
+            self.ws.send(json.dumps(message))
+        except OSError as error:  # the socket went away under us: a browser error, not a raw one
+            with self.lock:
+                self.pending.pop(ident, None)
+            self.closed = True
+            raise BrowserError("closed", f"{method}: browser connection lost ({type(error).__name__})") from None
         try:
             answer = waiter.get(timeout=timeout)
         except queue.Empty:
@@ -203,7 +211,8 @@ class Connection:
         return answer.get("result", {})
 
     def listen(self, session: str, listener: Callable[[dict], None]) -> None:
-        self.listeners.setdefault(session, []).append(listener)
+        with self.lock:  # the reader thread copies the list under no lock: replace it, never mutate it
+            self.listeners[session] = [*self.listeners.get(session, ()), listener]
 
     def close(self) -> None:
         self.closed = True
@@ -220,6 +229,11 @@ KEYS = {  # key -> (code, windowsVirtualKeyCode)
     **{f"F{n}": (f"F{n}", 111 + n) for n in range(1, 13)},
 }
 MODIFIERS = {"Alt": 1, "Control": 2, "Ctrl": 2, "Meta": 4, "Shift": 8}
+OEM_KEYS = {  # punctuation -> (code, windowsVirtualKeyCode) on a US layout
+    ".": ("Period", 190), ",": ("Comma", 188), "-": ("Minus", 189), "=": ("Equal", 187), "/": ("Slash", 191),
+    ";": ("Semicolon", 186), "'": ("Quote", 222), "[": ("BracketLeft", 219), "]": ("BracketRight", 221),
+    "\\": ("Backslash", 220), "`": ("Backquote", 192),
+}
 
 
 class Page:
@@ -301,8 +315,11 @@ class Page:
         if name in KEYS:
             code, vk = KEYS[name]
             key = " " if name == "Space" else name
-        elif len(name) == 1:
-            key, code, vk = name, ("Key" + name.upper()) if name.isalpha() else name, ord(name.upper())
+        elif len(name) == 1 and name.isascii() and name.isalnum():
+            key, code, vk = name, ("Key" + name.upper()) if name.isalpha() else "Digit" + name, ord(name.upper())
+        elif name in OEM_KEYS:  # ord('.') is 46, VK_DELETE: punctuation has its own virtual keys
+            code, vk = OEM_KEYS[name]
+            key = name
         else:
             raise BrowserError("cdp_error", f"unknown key {name!r}")
         base = {"key": key, "code": code, "windowsVirtualKeyCode": vk, "modifiers": modifiers}
@@ -349,9 +366,50 @@ def launch_args(profile_dir: Path, port: int, headless: bool) -> list[str]:
     features = FEATURES_OFF if headless else FEATURES_OFF + VISIBLE_FEATURES_OFF
     args = [f"--user-data-dir={profile_dir}", f"--remote-debugging-port={int(port)}",
             "--remote-debugging-address=127.0.0.1", "--no-first-run", "--no-default-browser-check",
-            "--disable-features=" + ",".join(features), "--window-size=1600,1000"]
+            "--disable-features=" + ",".join(features), "--window-size=1600,1000",
+            "--hide-crash-restore-bubble"]
     args += ["--headless=new"] if headless else list(VISIBLE_SWITCHES)
     return args
+
+
+def _same_dir(a: str | Path, b: str | Path) -> bool:
+    """The same folder: one file system object when both exist (8.3 names, junctions, subst), else
+    the same normalised path (case, slashes, a trailing separator)."""
+    try:
+        if os.path.samefile(str(a), str(b)):
+            return True
+    except OSError:
+        pass
+    norm = lambda p: os.path.normcase(os.path.normpath(os.path.realpath(str(p))))  # noqa: E731
+    return norm(a) == norm(b)
+
+
+def profile_of(command: str) -> str | None:
+    """The --user-data-dir of an Edge command line, quoted whole ("--user-data-dir=C:\\a b"), quoted
+    value (--user-data-dir="C:\\a b") or plain; backslashes kept. None: not given."""
+    found = None
+    # an unquoted value runs to the next switch: a path with spaces may come unquoted
+    for m in re.finditer(r'"--user-data-dir=([^"]*)"|--user-data-dir=(?:"([^"]*)"|(.+?)(?=\s+--|\s+"--|\s*$))', command):
+        found = next(g for g in m.groups() if g is not None)
+    return found
+
+
+def check_profile(conn: "Connection", profile_dir: Path) -> bool | None:
+    """Refuse (closing the connection) an Edge that runs another profile. Returns headless (None: unknown)."""
+    try:
+        command = conn.send("SystemInfo.getInfo").get("commandLine")
+    except BrowserError:
+        return None  # cannot tell: an Edge that does not answer this is not refused for it
+    if not isinstance(command, str) or not command.strip():
+        return None
+    dir_ = profile_of(command)  # before shlex: an apostrophe in a path must not skip this check
+    if dir_ is not None and not _same_dir(dir_, profile_dir):
+        conn.close()
+        raise BrowserError("foreign", "the Edge on that debugging port uses another profile")
+    try:
+        return any(re.fullmatch(r"--headless(?:=.*)?", arg) for arg in shlex.split(command))
+    except ValueError:
+        return None
 
 
 @dataclass
@@ -359,6 +417,7 @@ class Browser:
     process: subprocess.Popen | None
     conn: Connection
     profile_dir: Path
+    headless: bool | None = None
 
     @classmethod
     def launch(cls, profile_dir: Path, headless: bool = True, edge: str | None = None,
@@ -383,13 +442,19 @@ class Browser:
                 lines = port_file.read_text(encoding="utf-8").split()
                 if len(lines) >= 2:
                     ws = f"ws://127.0.0.1:{lines[0]}{lines[1]}"
-                    return cls(process, Connection(ws), profile_dir)
+                    return cls(process, Connection(ws), profile_dir, headless)
             except (FileNotFoundError, OSError):
                 pass
             if port:  # Edge 155 (2026-10-23) no longer writes DevToolsActivePort for a fixed port: ask the port
                 try:
                     with urllib.request.urlopen(f"http://127.0.0.1:{int(port)}/json/version", timeout=1) as response:
-                        return cls(process, Connection(json.loads(response.read())["webSocketDebuggerUrl"]), profile_dir)
+                        conn = Connection(json.loads(response.read())["webSocketDebuggerUrl"])
+                    try:
+                        check_profile(conn, profile_dir)  # the port may answer from another Edge, not ours
+                    except BrowserError:
+                        process.kill()
+                        raise
+                    return cls(process, conn, profile_dir, headless)
                 except (OSError, ValueError, KeyError):
                     pass
             time.sleep(0.2)
@@ -401,7 +466,10 @@ class Browser:
         """Attach to an Edge already listening on a loopback debugging port (e.g. a headed one Wald uses)."""
         with urllib.request.urlopen(f"http://127.0.0.1:{port}/json/version", timeout=5) as response:
             ws = json.loads(response.read())["webSocketDebuggerUrl"]
-        return cls(None, Connection(ws), Path(profile_dir))
+        browser = cls(None, Connection(ws), Path(profile_dir))
+        # someone else's Edge on that port: never drive (or later close) it; unknown mode is reported
+        browser.headless = check_profile(browser.conn, Path(profile_dir))
+        return browser
 
     def version(self) -> dict:
         return self.conn.send("Browser.getVersion")

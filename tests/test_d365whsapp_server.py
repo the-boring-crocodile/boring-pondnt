@@ -7,6 +7,7 @@ import json
 
 import pytest
 
+from boring_pondnt.d365_entra import Response
 from boring_pondnt.d365whsapp_client import WhsClient
 from boring_pondnt.d365whsapp_server import create_server
 from test_d365whsapp_client import CONFIG, FakeAos, sample
@@ -29,7 +30,11 @@ def server_for(fake, tmp_path, **kw):
 
 def test_tools_published(tmp_path):
     server = server_for(FakeAos(), tmp_path)
-    names = {t.name for t in asyncio.run(server.list_tools())}
+    tools = asyncio.run(server.list_tools())
+    names = {t.name for t in tools}
+    listed = json.dumps([t.model_dump(by_alias=True, exclude_none=True) for t in tools],
+                        ensure_ascii=False, separators=(",", ":"))
+    assert len(listed) <= 4_979  # 3,979 + 1,000
     assert names == {"whs_login", "whs_screen", "whs_submit", "whs_logoff", "whs_run_scenario", "whs_wait", "whs_log"}
 
 
@@ -43,6 +48,20 @@ def test_login_submit_screen(tmp_path):
     assert not error and screen == page
     log = (tmp_path / "calls-d365whsapp.jsonl").read_text()
     assert '"1"' not in log and "password" not in log  # argument text is never logged
+
+
+def test_unusable_token_reply_maps_to_d365whsapp_failure(tmp_path):
+    requests = []
+
+    def transport(url, *args):
+        requests.append(url)
+        return Response(200, "{}")
+
+    server = server_for(transport, tmp_path)
+    error, outcome = call(server, "whs_login", {"worker": "whsapp01", "password": "1"})
+    assert error and outcome["status"] == "failed" and outcome["code"] == "token_failed"
+    assert outcome["message"] == "Entra returned an unusable token reply"
+    assert requests == ["https://login.microsoftonline.com/tenant.example/oauth2/v2.0/token"]
 
 
 def test_refusals_and_failures(tmp_path):
@@ -83,9 +102,10 @@ def test_scenario_refuses_bad_steps_before_running(tmp_path):
     assert len(fake.requests) == 2
 
 
-def test_call_budget_caps_the_step_timeout(tmp_path):
+def test_call_budget_caps_single_calls_but_not_a_runs_steps(tmp_path):
     server = server_for(FakeAos(), tmp_path, call_budget=60.0)
-    assert server._d365whsapp_client.config.step_timeout == 55.0
+    client = server._d365whsapp_client
+    assert client.call_timeout == 55.0 and client.config.step_timeout == 300.0
 
 
 def test_scenario_variables_and_notes(tmp_path):
@@ -360,3 +380,28 @@ def test_form_mode_single_call_does_not_wait_past_its_budget_for_the_browser(tmp
     with backend.lock:  # another worker's step holds the browser
         error, outcome = call(server, "whs_submit", {"worker": "WHSAPP05", "press": "Inbound"})
     assert error and outcome["code"] == "busy" and "another worker" in outcome["message"]
+
+
+def test_a_second_acting_call_for_a_worker_is_refused_while_one_runs():
+    import pytest as _pytest
+    from boring_service_kit.outcomes import Refused as _Refused
+    from boring_pondnt.d365whsapp_server import ScenarioRuns
+    runs = ScenarioRuns(None)
+    with runs.acting("w1"):
+        with _pytest.raises(_Refused) as caught:
+            with runs.acting(" W1 "):  # the same worker, spelled differently
+                pass
+        assert caught.value.code == "busy"
+        with runs.acting("W2"):
+            pass
+    with runs.acting("W1"):
+        pass
+
+
+def test_step_log_files_keep_workers_apart_and_entries_on_one_line(tmp_path):
+    from boring_pondnt.d365whsapp_steplog import StepLog, _file_name
+    assert _file_name("A B") != _file_name("A_B")
+    log = StepLog(tmp_path)
+    log.record("W1", "press OK\n2026-01-01 00:00:00  W1  forged")
+    text = log.path("W1").read_text()
+    assert text.count("\n2026-01-01") == 0

@@ -32,6 +32,7 @@ and holds these forwards open:
 | `-R 127.0.0.1:18522` | host to box | Pond calls to `devbox-d365` (D365 with its xref tools) |
 | `-R 127.0.0.1:18524` | host to box | Pond calls to `devbox-d365whsapp` ([warehouse-flow tests](D365WHSAPP.md)) |
 | `-R 127.0.0.1:18526` | host to box | Pond calls to `devbox-d365web` ([browser automation](D365WEB.md)) |
+| `-R 127.0.0.1:18528` | host to box | Pond calls to `devbox-d365data` ([OData and DMF](D365DATA.md)) |
 | `-L 127.0.0.1:18503 -> 127.0.0.1:8503` | box to host | the box's servers check call tokens at the Crocodile |
 
 `pondnt-tunnel` has no shell, no sudo and no groups; its key may do exactly
@@ -80,14 +81,15 @@ the helper refuses broader inherited access and does not silently repair ACLs.
    (HOME from `/etc/boring-pond/homes.json`, else `/opt/boring-crocodile`);
    `--admin <absolute path>` names another. A missing, non-executable or
    not root-owned executable is refused before anything runs.
-   Optional: `devbox-d365whsapp` (18524) and `devbox-d365web` (18526) the same way, e.g.
+   Optional: `devbox-d365whsapp` (18524), `devbox-d365web` (18526) and
+   `devbox-d365data` (18528) the same way, e.g.
    `sudo boring-crocodile-admin service-add devbox-d365whsapp --url http://127.0.0.1:18524/mcp --ponds pond`;
-   `claim-services` replaces the list, so name every service: `--services devbox devbox-d365 devbox-d365whsapp devbox-d365web`.
+   `claim-services` replaces the list, so name every service: `--services devbox devbox-d365 devbox-d365whsapp devbox-d365web devbox-d365data`.
    **Another Pond as caller** (for example a Pond named `research`): the
    Crocodile grant and the backend's caller policy must both allow it.
    On the host, per service, the complete set of callers (plan, then `--apply --approve-digest`):
    `sudo boring-crocodile-admin service-grants devbox --callers pond,research`, and the same for
-   devbox-d365, devbox-d365whsapp, devbox-d365web; then `claim-services` again with every service, so the
+   devbox-d365, devbox-d365whsapp, devbox-d365web, devbox-d365data; then `claim-services` again with every service, so the
    receipt holds the new definitions. On the box, next to the credentials:
    `C:\temp\ci\devbox-callers.json` = `[{"subject": "research", "role": "writer"}]` (role `reader` or
    `writer`; `pond` is always a writer and is not listed), then restart the devbox services. Without the
@@ -103,6 +105,7 @@ the helper refuses broader inherited access and does not silently repair ACLs.
    root containing `python\python.exe`. It starts the tunnel process, then
    each server with provisioned credentials and any required configuration.
    `-Only devbox-d365` restarts just that server and leaves the tunnel alone.
+   `-Only tunnel` restarts just SSH and leaves every backend process running.
 
    The helper records each process in `devbox-processes.json`; stop and restart
    check PID, start time, executable and command line, leaving unrecorded
@@ -167,18 +170,36 @@ review the dedicated working folder for disposal. A source index, local
 Visual Studio configuration or browser profile may belong to another route;
 removing this tunnel is not permission to delete those shared resources.
 
-## Adding d365whsapp / d365web to an existing tunnel
+## Adding optional backends to an existing tunnel
 
-The box's key line must permit all four configured listen ports first: with
-`ExitOnForwardFailure`, a tunnel that asks for 18524/18526 without that permission
+The box's key line must permit all five configured listen ports first: with
+`ExitOnForwardFailure`, a tunnel that asks for 18524/18526/18528 without that permission
 fails as a whole.
 
 1. Host, as root, from this release's `extras/pond-tunnel`: run the setup step
    again with exactly the original inputs (`--source-keys`, `--comment`,
    `--box`, `--control-plane`). It republishes the key line, now with
-   `permitlisten="127.0.0.1:18524"` and `"127.0.0.1:18526"`. Check:
-   `sudo grep -c 18526 /home/pondnt-tunnel/.ssh/authorized_keys` prints 1.
+   `permitlisten="127.0.0.1:18524"`, `"127.0.0.1:18526"` and
+   `"127.0.0.1:18528"`. Check:
+   `sudo grep -c 18528 /home/pondnt-tunnel/.ssh/authorized_keys` prints 1.
 2. Host: `service-add` per service as above and `claim-services` with every name.
-3. Box: `<service>-id`, `<service>-secret` and the service's `d365whsapp.json` / `d365web.json` into `C:\temp\ci`;
+3. Box: `<service>-id`, `<service>-secret` and the service's `d365whsapp.json` /
+   `d365web.json` / `d365data.json` into `C:\temp\ci`;
    a service without its .json is not started.
-4. Box: restart the tunnel task with this release's `devbox-start.ps1`.
+4. Box: update the operator-created start and reconnect tasks to this
+   release's `devbox-start.ps1` and release path, preserving their other
+   arguments, principals and triggers. Do this before recording a new backend:
+   older helpers reject process receipts containing names they do not know.
+   Updating a task's action alone does not restart its running backends.
+5. Box: run the updated helper with `-Only tunnel` and the same tunnel
+   arguments after the host permits every requested forward.
+
+For d365data, create its dedicated Entra app/user, DPAPI secret and private
+package folder as [D365DATA.md](D365DATA.md#install) describes. Its tunnel
+config is separate from the local scheduled-task config. Provision only
+devbox-d365data's own service credentials; do not reuse another service's
+identity. After the host key permissions and registration are ready, start
+just this backend with -Only devbox-d365data. This leaves existing backends
+running. The SSH tunnel must separately be restarted with the updated
+helper so 18528 is forwarded; this briefly interrupts Pond connectivity.
+Do not request the new forward before its host-side permission is installed.

@@ -149,6 +149,13 @@ Say "pondNT setup -- release folder $root" Cyan
 if ($WhatIf) { Say "(-WhatIf: looking only, nothing will change)" Yellow }
 
 $stateRoot = Join-Path $env:LOCALAPPDATA 'boring-pondnt'
+# The SYSTEM tasks run through cmd.exe, which expands %NAME% even inside quotes: a path with
+# a '%' could start another program or log elsewhere. Refused before anything changes.
+foreach ($checked in @($root, $stateRoot, $Index)) {
+    if ($checked -and $checked.Contains('%')) {
+        throw "path contains '%', which the services' cmd.exe task lines would expand: $checked; use a path without '%'"
+    }
+}
 function Services-Plan($config, [switch]$Apply, [switch]$Remove, [switch]$Finalize) {
     $a = @('-B', '-m', 'boring_pondnt.setup_services', '--root', $root, '--state', $stateRoot, '--only', $Services)
     # Windows PowerShell 5.1 drops an empty argument on its way to a program: without an index
@@ -255,9 +262,20 @@ function Stop-CheckedProcess($observed) {
     try {
         $null = $process.Handle  # retain this process, not a later reuse of its PID
         # CIM creation timestamps have microsecond precision; Process exposes 100 ns ticks.
-        if (-not $observed.CreationDate -or $process.Path -ine $observed.ExecutablePath -or
-            [Math]::Abs(($process.StartTime.ToUniversalTime() - $observed.CreationDate.ToUniversalTime()).Ticks) -gt 9) {
-            throw "Selected service process identity changed; not stopped."
+        # Name the failed check: the one recorded incident (gateway, 2026-11-04) could not be
+        # explained afterwards because the message did not say which comparison failed.
+        # A process whose task was just stopped can already be exiting: Windows then gives .NET no
+        # path for it (a dev box's gateway, 2026-11-05: "path '' vs CIM ..."). Let it finish instead of
+        # refusing; a live process with the same start time but no path is still refused below.
+        if (-not $process.Path -and ($process.HasExited -or $process.WaitForExit(10000))) { return }
+        $why = @()
+        if (-not $observed.CreationDate) { $why += 'no CIM creation date' }
+        elseif ([Math]::Abs(($process.StartTime.ToUniversalTime() - $observed.CreationDate.ToUniversalTime()).Ticks) -gt 9) {
+            $why += "start time $($process.StartTime.ToUniversalTime().ToString('o')) vs CIM $($observed.CreationDate.ToUniversalTime().ToString('o'))"
+        }
+        if ($process.Path -ine $observed.ExecutablePath) { $why += "path '$($process.Path)' vs CIM '$($observed.ExecutablePath)'" }
+        if ($why) {
+            throw "Selected service process identity changed (pid $($observed.ProcessId): $($why -join '; ')); not stopped."
         }
         $process.Kill()
         if (-not $process.WaitForExit(10000)) { throw "Selected service process did not exit within 10 seconds." }
@@ -357,9 +375,15 @@ function Say-Handbook($kit) {
         'new' { Say "    The handbook -> $($kit.folder) (copied once from this release; later releases never overwrite it)" }
         'kept' {
             if ($kit.seeded) { Say "    The handbook: copied to $($kit.folder)" Green }
-            elseif (@($kit.differs).Count) {
-                Say "    The handbook: $($kit.folder) kept; differs from this release's handbook in: $(@($kit.differs) -join ', ')" Yellow
-                Say "      review and merge deliberately: compare $($kit.release) with it (setup never overwrites it)" Yellow
+            elseif ($kit.differs -or $kit.new_pages) {
+                if ($kit.differs) {
+                    Say "    The handbook: $($kit.folder) kept; differs from this release's handbook in: $(@($kit.differs) -join ', ')" Yellow
+                    Say "      review and merge deliberately: compare $($kit.release) with it (setup never overwrites it)" Yellow
+                } else { Say "    The handbook: $($kit.folder) kept" }
+                if ($kit.new_pages) {
+                    Say "      new in this release: $(@($kit.new_pages) -join ', ')" Yellow
+                    Say "      Ferry uses the release's copy for missing service guides. Copy new pages into your handbook to adapt them." Yellow
+                }
             } else { Say "    The handbook: $($kit.folder) kept; same as this release's handbook" }
         }
         'no-release-kit' { Say "    The handbook: this release has none at $($kit.release)" Yellow }

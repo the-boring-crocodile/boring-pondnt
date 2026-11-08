@@ -39,13 +39,19 @@ class FakeAos:
         self.replies = list(replies)
         self.requests: list[dict] = []
         self.token_calls = 0
+        self.lookup_requests = []
+        self.lookup_reply = Response(200, '{"value": []}')
 
-    def __call__(self, url, headers, body, timeout):
+    def __call__(self, url, headers, body, timeout, **options):
         if "login.microsoftonline.com" in url:
             self.token_calls += 1
             assert b"client_secret=s3cret" in body
             return Response(200, json.dumps({"access_token": "tok", "expires_in": 3600}))
         assert headers["Authorization"] == "Bearer tok"
+        if options.get("method") == "GET":
+            self.lookup_requests.append({"url": url, "headers": headers, "body": body,
+                                         "timeout": timeout, **options})
+            return self.lookup_reply
         payload = json.loads(body)
         self.requests.append({"url": url, "timeout": timeout, **payload})
         reply = self.replies.pop(0)
@@ -115,14 +121,44 @@ def test_lost_reply_recovers_by_login_never_by_resend():
     assert [r["_xml"] == "" for r in fake.requests] == [True, False, False, True, False]  # resend never happens
 
 
-@pytest.mark.parametrize("name", ["error-session-token.txt", "error-multi-device.txt"])
-def test_token_errors_recover_by_login(name):
-    status, body = sample(name).split(" ", 2)[1:]
+def test_token_errors_recover_by_login():
+    status, body = sample("error-session-token.txt").split(" ", 2)[1:]
     fake = FakeAos("login.xml", "menu-main.xml", (int(status), body), "login.xml", "menu-main.xml")
     c = client(fake)
     c.login("WHSAPP01", "1")
     page, recovered = c.submit("WHSAPP01", None, "Inbound")
     assert recovered and page.pattern == "Menu"
+
+
+def test_another_device_holding_the_worker_is_never_taken_back():
+    # MULTI_DEVICE_USER_LOGIN: a person's handheld or another host logged the worker in
+    status, body = sample("error-multi-device.txt").split(" ", 2)[1:]
+    fake = FakeAos("login.xml", "menu-main.xml", (int(status), body))
+    c = client(fake)
+    c.login("WHSAPP01", "1")
+    with pytest.raises(WhsError) as raised:
+        c.submit("WHSAPP01", None, "Inbound")
+    assert raised.value.code == "session_taken"
+    assert len(fake.requests) == 3  # login page, login, the step: no second login
+    with pytest.raises(WhsError) as raised:
+        c.submit("WHSAPP01", None, "Inbound")
+    assert raised.value.code == "no_session"
+
+
+def test_service_error_bodies_never_crash_and_only_protocol_codes_count():
+    from boring_pondnt.d365whsapp_protocol import parse_service_error
+    assert parse_service_error(500, '{"error":"boom"}').message == "boom"
+    assert parse_service_error(500, '{"error":{"message":"x"}}').message == "x"
+    assert parse_service_error(500, "Item not found: WAREHOUSE24").code == ""
+    assert parse_service_error(500, "busy ERROR_SESSION_BUSY").code == "ERROR_SESSION_BUSY"
+
+
+def test_a_control_character_in_a_value_is_refused_before_sending():
+    from boring_pondnt.d365whsapp_protocol import ProtocolError, build_request, parse_page
+    page = parse_page(sample("login.xml"))
+    with pytest.raises(ProtocolError, match="control character"):
+        build_request(page, {"UserId": "a\x01b"}, None)
+    build_request(page, {"UserId": "a\tb"}, None)  # TAB survives as &#09;
 
 
 def test_tampering_is_reported_and_the_page_kept():
@@ -245,3 +281,14 @@ def test_config_with_a_bom(tmp_path):
     path = tmp_path / "d365whsapp.json"  # what PowerShell 5's Set-Content -Encoding utf8 writes
     path.write_bytes(b"\xef\xbb\xbf" + json.dumps({"aos_url": "https://aos", "tenant": "t", "client_id": "c"}).encode())
     assert Config.load(path).client_id == "c"
+
+
+def test_logoff_never_presses_a_button_twice_on_a_page_it_did_not_leave():
+    fake = FakeAos("login.xml", "menu-main.xml", "menu-inbound.xml", "menu-inbound.xml", "menu-inbound.xml")
+    c = client(fake)
+    c.login("WHSAPP01", "1")
+    c.submit("WHSAPP01", None, "Inbound")
+    with pytest.raises(WhsError, match="did not leave this page") as raised:
+        c.logoff("WHSAPP01")
+    assert raised.value.code == "stuck" and len(fake.requests) == 4  # one Back, not a second
+    c.session("WHSAPP01")  # the session stays where it is

@@ -19,18 +19,31 @@ def test_call_log_records_outcomes_without_contents(tmp_path):
     asyncio.run(server.call_tool("file_write", {"path": str(target), "content": "secret" * 100,
                                                 "expected_sha256": None}))
     asyncio.run(server.call_tool("file_read", {"path": "relative"}))
-    lines = [json.loads(line) for line in (tmp_path / "state" / "calls.jsonl").read_text().splitlines()]
+    lines = [json.loads(line) for line in (tmp_path / "state" / "calls-core.jsonl").read_text().splitlines()]
     assert [(e["tool"], e["outcome"], e["code"]) for e in lines] == [
         ("file_write", "succeeded", None), ("file_read", "refused", "invalid_request")]
     assert lines[0]["args"]["content"] == {"chars": 600}
-    assert "secret" not in (tmp_path / "state" / "calls.jsonl").read_text()
+    assert "secret" not in (tmp_path / "state" / "calls-core.jsonl").read_text()
     assert lines[0]["result_bytes"] > 0 and lines[0]["ms"] >= 0
 
 
 def test_no_call_log_unless_asked(tmp_path):
     server = create_server(state_dir=tmp_path / "state")
     asyncio.run(server.call_tool("file_list", {"path": str(tmp_path)}))
-    assert not (tmp_path / "state" / "calls.jsonl").exists()
+    assert not (tmp_path / "state" / "calls-core.jsonl").exists()
+
+
+def test_each_server_has_its_own_call_log_name():
+    """A support bundle collects several state folders into one flat folder: two servers
+    writing the same name overwrote one another (core and the bundled Knowledge both
+    wrote calls.jsonl)."""
+    import importlib  # noqa: PLC0415
+    ours = [importlib.import_module(f"boring_pondnt.{name}").CALL_LOG for name in
+            ("server", "d365_server", "d365web_server", "d365data_server", "d365whsapp_server")]
+    bundled_services = ["calls.jsonl", "calls-sourcecache.jsonl"]  # Knowledge's, Sourcecache's
+    names = ours + bundled_services
+    assert len(set(names)) == len(names), names
+    assert all(name.startswith("calls-") and name.endswith(".jsonl") for name in ours)
 
 
 def test_summarize_counts_commands_and_operations_without_contents():

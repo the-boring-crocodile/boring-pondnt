@@ -19,7 +19,7 @@ Layout of `boring-pondnt-<version>-win-x64/`:
     boring-pondnt-core.cmd    launcher: boring-pondnt-core.cmd [--self-check] ...
     boring-sourcecache-d365.cmd, boring-knowledge.cmd, boring-canvas-server.cmd  the bundled services
     boring-pondnt-d365.cmd    launcher: boring-pondnt-d365.cmd serve ... (D365 operations plus read-only xref)
-    MANIFEST.json      versions, input hashes, git commit
+    MANIFEST.json      versions, input hashes, git commit and its time
     tests/, pytest.ini, run-tests.cmd   with --with-tests (for CI)
 
 Dependencies come from the committed hash locks (requirements.lock, and
@@ -28,6 +28,10 @@ installed with `uv --python-platform x86_64-pc-windows-msvc`, because pip
 evaluates `sys_platform == "win32"` markers against the build host and silently
 drops Windows-only dependencies such as pywin32.
 Downloads are cached in ~/lab/boring-pondnt-cache and their sha256 recorded.
+
+Two builds of one commit with the same inputs give the same zip, byte for byte:
+no build time anywhere (MANIFEST.json records the commit's time; every zip entry
+carries it, with one file mode), and uv's per-install uv_cache.json is dropped.
 """
 
 from __future__ import annotations
@@ -109,6 +113,47 @@ def fetch(url: str, expected_sha256: str) -> Path:
 def package_version() -> str:
     text = (REPO / "src" / "boring_pondnt" / "__init__.py").read_text()
     return text.split('__version__ = "', 1)[1].split('"', 1)[0]
+
+
+def release_layout(version: str, with_tests: bool) -> tuple[str, str]:
+    """The candidate archive uses Python's version; its folder separates the rc number."""
+    suffix = "-tests" if with_tests else ""
+    archive = f"boring-pondnt-{version}-win-x64" + suffix
+    candidate = re.fullmatch(r"(\d+\.\d+\.\d+)rc(\d+)", version)
+    folder = (f"pondnt-{candidate[1]}-rc{candidate[2]}" + suffix) if candidate else archive
+    return archive, folder
+
+
+def write_release_archive(stage: Path, out: Path, release_name: str,
+                          date_time: tuple[int, int, int, int, int, int] = (1980, 1, 1, 0, 0, 0)) -> Path:
+    """The zip depends on the files' names and contents only: entries in sorted order,
+    each with DATE_TIME (the commit's) and one mode, not the stage's mtimes and modes."""
+    archive_path = out / f"{release_name}.zip"
+    with zipfile.ZipFile(archive_path, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as archive:
+        for path in sorted(stage.rglob("*")):
+            if path.is_file():
+                entry = zipfile.ZipInfo(f"{stage.name}/{path.relative_to(stage).as_posix()}", date_time)
+                entry.external_attr = 0o644 << 16  # Windows ignores Unix modes; fixed, not the stage's
+                archive.writestr(entry, path.read_bytes(), zipfile.ZIP_DEFLATED, 6)
+    return archive_path
+
+
+def drop_uv_cache_info(site_packages: Path) -> list[str]:
+    """uv writes dist-info/uv_cache.json (with the install's timestamp) for packages it
+    installed from local wheels; RECORD lists it with its hash. Neither runtime nor
+    uninstall needs it, so it goes, and its RECORD line with it. Returns what went."""
+    dropped = []
+    for cache_info in sorted(site_packages.glob("*.dist-info/uv_cache.json")):
+        record = cache_info.parent / "RECORD"
+        listed = f"{cache_info.parent.name}/uv_cache.json,"
+        lines = record.read_text(encoding="utf-8").splitlines(keepends=True)
+        kept = [line for line in lines if not line.startswith(listed)]
+        if len(kept) != len(lines) - 1:
+            raise SystemExit(f"{record}: expected one line for uv_cache.json, found {len(lines) - len(kept)}")
+        record.write_text("".join(kept), encoding="utf-8")
+        cache_info.unlink()
+        dropped.append(cache_info.parent.name)
+    return dropped
 
 
 def write_services_test_config(stage: Path) -> None:
@@ -194,9 +239,11 @@ def build(with_tests: bool, out: Path, services_root: Path, common_wheels: Path,
     _, develop = load(common_wheels)
     app_version = package_version()  # pondNT's; each wheel keeps its own (local_pins)
     commit = develop.git(REPO, "rev-parse", "--short", "HEAD").strip()
+    committed = datetime.datetime.fromtimestamp(int(develop.git(REPO, "show", "-s", "--format=%ct", "HEAD")),
+                                                datetime.timezone.utc)
     dirty = bool(develop.git(REPO, "status", "--porcelain").strip())
-    release_name = f"boring-pondnt-{app_version}-win-x64" + ("-tests" if with_tests else "")
-    stage = out / release_name
+    release_name, install_folder = release_layout(app_version, with_tests)
+    stage = out / install_folder
     if stage.exists() or (out / f"{release_name}.zip").exists():
         raise SystemExit("release already exists; choose a new output directory/version")
     stage.mkdir(parents=True)
@@ -247,6 +294,7 @@ def build(with_tests: bool, out: Path, services_root: Path, common_wheels: Path,
     site_packages = stage / "python" / "Lib" / "site-packages"
     shutil.rmtree(site_packages / "pythonwin")
     (site_packages / "win32" / "pythonservice.exe").unlink()
+    drop_uv_cache_info(site_packages)
 
     develop.plain_copy(REPO / "handbook", stage / "handbook")
     develop.plain_copy(REPO / "docs", stage / "docs")  # installed guides referenced by the handbook
@@ -309,10 +357,11 @@ def build(with_tests: bool, out: Path, services_root: Path, common_wheels: Path,
     check_release_version(app_version, release_name, list(wheel_dir.glob("*.whl")), installed)
     manifest = {
         "name": release_name,
+        "install_folder": install_folder,
         "common": common,
         "boring-pondnt": app_version,
         "commit": commit + ("-dirty" if dirty else ""),
-        "built": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "commit_time": committed.strftime("%Y-%m-%dT%H:%M:%SZ"),  # not the build's: one commit, one zip
         "python": {"version": PYTHON_VERSION, "url": PYTHON_URL, "sha256": sha256(python_zip)},
         "pwsh": {"version": PWSH_VERSION, "url": PWSH_URL, "sha256": sha256(pwsh_zip)},
         "packages": [d[: -len(".dist-info")] for d in installed],
@@ -326,11 +375,8 @@ def build(with_tests: bool, out: Path, services_root: Path, common_wheels: Path,
     }
     (stage / "MANIFEST.json").write_text(json.dumps(manifest, indent=2) + "\n")
 
-    archive_path = out / f"{release_name}.zip"
-    with zipfile.ZipFile(archive_path, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as archive:
-        for path in sorted(stage.rglob("*")):
-            if path.is_file():
-                archive.write(path, f"{release_name}/{path.relative_to(stage).as_posix()}")
+    date_time = (committed.year, committed.month, committed.day, committed.hour, committed.minute, committed.second)
+    archive_path = write_release_archive(stage, out, release_name, date_time)
     shutil.copyfile(stage / "INSTALL.md", out / "INSTALL.md")  # readable before unpacking
     print(json.dumps({"zip": str(archive_path), "bytes": archive_path.stat().st_size,
                       "commit": manifest["commit"]}))

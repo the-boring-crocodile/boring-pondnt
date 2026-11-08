@@ -125,6 +125,23 @@ Refuses { Resolve-DevboxTunnel $record $file }
 Require ($script:kills -eq $beforeKills) 'Refusals must not kill.'
 'PASS: ensure-tunnel: absent, running, ended and reused PID restart; changed command, stop in progress and unknown start refuse.'
 
+# Exercise the script entry point: selecting SSH must not inspect/stop a backend.
+$onlyRoot = Join-Path $Fixture 'only-tunnel'
+$null = New-Item -ItemType Directory -Path $onlyRoot
+$onlyFile = Join-Path $onlyRoot 'devbox-processes.json'
+$onlyRecord = Read-DevboxRecord $onlyFile
+$onlyRecord.entries = @(
+    [pscustomobject]@{name='devbox-d365data';state='running';pid=123;created='123';executable='C:\fixture.exe';commandline='"C:\fixture.exe"'},
+    [pscustomobject]@{name='tunnel';state='stopped';pid=124;created='123';executable='C:\fixture.exe';commandline='"C:\fixture.exe"'}
+)
+Write-MaintenanceRecord $onlyFile $onlyRecord
+$beforeKills = $script:kills
+& $Helper -Stop -Only tunnel -CiRoot $onlyRoot
+$after = Read-DevboxRecord $onlyFile
+Require ($after.entries[0].state -eq 'running' -and $after.entries[0].pid -eq 123) 'Tunnel-only stop changed a backend.'
+Require ($script:kills -eq $beforeKills) 'Tunnel-only stop killed an unselected process.'
+'PASS: tunnel-only selection leaves backend identity and process untouched.'
+
 $quoted = Quote-DevboxArgument 'C:\path with space\'
 Require ($quoted -ceq '"C:\path with space\\"') 'Trailing-backslash quoting failed.'
 Refuses { Quote-DevboxArgument ("bad" + [char]10 + "argument") }

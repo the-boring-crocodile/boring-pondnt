@@ -77,7 +77,7 @@ def test_combined_stdio_initialize_list_call(index, tmp_path):  # noqa: F811
             async with ClientSession(reader, writer, read_timeout_seconds=5) as client:
                 await client.initialize()
                 tools = (await client.list_tools()).tools
-                assert len(tools) == 8 and len({t.name for t in tools}) == 8
+                assert len(tools) == 9 and len({t.name for t in tools}) == 9
                 result = await client.call_tool('xref', {'what': 'names', 'name': 'ContosoBase'})
                 assert not result.is_error and data(result)['names']
                 result = await client.call_tool('d365_run', {'command': 'Get-D365Model'})
@@ -96,7 +96,7 @@ def test_combined_http_discovery_calls_and_auth(index, tmp_path):  # noqa: F811
             response = await service.client.post('/mcp', json=body, headers=_headers('tools/list', token='pond'))
             assert response.status_code == 200, response.text
             tools = response.json()['result']['tools']
-            assert len(tools) == 8
+            assert len(tools) == 9
             refs = [t for t in tools if t['name'] == 'xref']
             assert len(refs) == 1 and refs[0]['annotations']['readOnlyHint']
             error, result = await service.result('xref', {'what': 'names', 'name': 'ContosoBase'})

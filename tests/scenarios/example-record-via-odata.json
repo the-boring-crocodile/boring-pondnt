@@ -1,0 +1,118 @@
+{
+  "name": "Example: create, inspect and delete a reference record through OData",
+  "parameters": {
+    "data_service": {
+      "example": "d365data",
+      "about": "Configured Ferry backend or separately provisioned Pond service for d365data; no tunnel alias is installed automatically"
+    },
+    "web_service": {
+      "example": "d365web",
+      "about": "Configured d365web backend signed in to the same target with permission to view the reference form"
+    },
+    "company": {
+      "example": "usmf",
+      "about": "Disposable legal entity with Asset management enabled"
+    },
+    "record_id": {
+      "example": "ZZTEST-ODATA-01",
+      "about": "Fresh unused ZZTEST id, at most 20 ASCII letters/digits/hyphens; no apostrophes"
+    }
+  },
+  "requires": "Documentation only: execute each part deliberately and inspect its result before continuing. Both services must target the same environment/company. The D365 data user needs create/read/delete on AssetMaintenanceJobGroups; the browser user needs the EntAssetJobGroup menu/form. Sourcecache 10.0.49: EntAssetMaintenanceJobGroupEntity is public and maps JobGroupId/Name to EntAssetJobGroup; EntAssetJobGroupID is 20 characters; the standard table has no delete actions. Check target metadata/extensions first. Stop unless the preflight query is empty; never delete a record that existed before this run.",
+  "changes": "Creates and deletes only this run's unused reference-data id. Do not attach job types or other records to it. On any error, mismatch or lost reply, stop and inspect the exact id in the same company; clean up only after proving this run created it. Nothing runs this file automatically.",
+  "parts": [
+    {
+      "service": "${data_service}",
+      "tool": "odata_query",
+      "note": "Preflight: require shown=0, truncated=false and next=null. Otherwise stop and choose a fresh id.",
+      "arguments": {
+        "entity": "AssetMaintenanceJobGroups",
+        "filter": "JobGroupId eq '${record_id}'",
+        "select": "dataAreaId,JobGroupId,Name",
+        "company": "${company}",
+        "top": 2
+      }
+    },
+    {
+      "service": "${data_service}",
+      "tool": "odata_write",
+      "note": "Create the isolated reference record through its standard public entity. A lost response requires inspection before any retry.",
+      "arguments": {
+        "entity": "AssetMaintenanceJobGroups",
+        "op": "create",
+        "values": {
+          "JobGroupId": "${record_id}",
+          "Name": "ZZTEST OData example"
+        },
+        "company": "${company}"
+      }
+    },
+    {
+      "service": "${data_service}",
+      "tool": "odata_query",
+      "note": "Require exactly one row with this company, id and Name=ZZTEST OData example; stop on mismatch.",
+      "arguments": {
+        "entity": "AssetMaintenanceJobGroups",
+        "filter": "JobGroupId eq '${record_id}'",
+        "select": "dataAreaId,JobGroupId,Name",
+        "company": "${company}",
+        "top": 2
+      }
+    },
+    {
+      "service": "${web_service}",
+      "tool": "web_run_scenario",
+      "note": "Readback in the standard reference form. JobGroup_JobGroupID is its source control name, independent of the localized caption. This UI example has not been run in the setup round.",
+      "arguments": {
+        "steps": [
+          {
+            "op": "open",
+            "menu_item": "EntAssetJobGroup",
+            "company": "${company}",
+            "expect": {
+              "form": "EntAssetJobGroup"
+            }
+          },
+          {
+            "op": "filter",
+            "column": "JobGroup_JobGroupID",
+            "value": "${record_id}",
+            "expect": {
+              "grid": {
+                "rows": 1,
+                "contains": {
+                  "JobGroup_JobGroupID": "${record_id}"
+                }
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "service": "${data_service}",
+      "tool": "odata_write",
+      "note": "Delete only the record proven to have been created by this run. Company supplies the dataAreaId key.",
+      "arguments": {
+        "entity": "AssetMaintenanceJobGroups",
+        "op": "delete",
+        "key": {
+          "JobGroupId": "${record_id}"
+        },
+        "company": "${company}"
+      }
+    },
+    {
+      "service": "${data_service}",
+      "tool": "odata_query",
+      "note": "Final verification: require shown=0, truncated=false and next=null; otherwise record and investigate the residual.",
+      "arguments": {
+        "entity": "AssetMaintenanceJobGroups",
+        "filter": "JobGroupId eq '${record_id}'",
+        "select": "dataAreaId,JobGroupId",
+        "company": "${company}",
+        "top": 2
+      }
+    }
+  ]
+}

@@ -6,9 +6,12 @@ import re
 import time
 import xml.etree.ElementTree as ET
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any
+from . import __version__
+from . import d365_logs as log_sources
 from . import sqlserver
-from .d365 import TAIL_LINES_DEFAULT, WAIT_SECONDS_MAX, Jobs, Session, check_tail_lines, checked_name, ps_quote
+from pydantic import Field, StrictInt
+from .d365 import NAME, TAIL_LINES_DEFAULT, TAIL_LINES_MAX, WAIT_SECONDS_MAX, Jobs, Session, check_tail_lines, checked_name, ps_quote
 from boring_service_kit.tools import READ_ONLY, RUNS, WRITES
 from boring_service_kit.outcomes import Failed, Outcome, Refused
 
@@ -28,11 +31,32 @@ RUN_COMMAND_CHARS = 20_000
 RUN_OUTPUT_DEFAULT, RUN_OUTPUT_MAX = 20_000, 200_000
 RUN_TIMEOUT_DEFAULT, RUN_TIMEOUT_MAX = 60, 600
 
-_SECRET_NAME = r"[a-z0-9_]*(?:password|pwd|secret|accountkey|sharedaccesskey|sig|token)"
+_SECRET_NAME = r"[a-z0-9_]*(?:password|passwort|pwd|secret|accountkey|sharedaccesskey|sig|token|apikey|api_key|credential)"
 _SECRET_KEY = re.compile(r"(?i)^" + _SECRET_NAME + r"$")
 _SECRET = re.compile(
-    r"(?i)\b(" + _SECRET_NAME + r")([\"']?\s*[=:]\s*|\s+)"
+    # OData's $skiptoken is a continuation cursor; masking it breaks paging.
+    r"(?i)\b((?!(?<=\$)skiptoken(?=[\"']?\s*[=:]))" + _SECRET_NAME + r")([\"']?\s*[=:]\s*|\s+)"
     r"('(?:[^']|'')*'|\"[^\"]*\"|'[^']*$|\"[^\"]*$|[^\s\"'&]+)")
+
+# Credentials recognised by their shape, wherever they stand: a JWT (Entra access tokens), a bearer
+# header, a pondNT/Pond access key.
+_SECRET_SHAPES = (
+    (re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]*"), "***"),
+    # a bearer value looks like a token: long, or with digits or token punctuation ("Bearer authentication" is prose)
+    (re.compile(r"(?i)\b(bearer)\s+(?=[A-Za-z0-9._~+/=-]{20,}|[A-Za-z]*[0-9._~+/=-])[A-Za-z0-9._~+/=-]{8,}"), r"\1 ***"),
+    (re.compile(r"\bbsk_[A-Za-z0-9_-]{8,}"), "bsk_***"),
+)
+
+
+def _mask(match: re.Match[str], text: str) -> str:
+    """name=value and name: value always; name value (a space only) for a switch (-Password x) or a
+    value that looks secret (a digit, 16+ characters): "the token expired at noon" stays prose."""
+    name, separator, secret = match.group(1), match.group(2), match.group(3)
+    if not separator.strip():
+        switch = match.start(1) > 0 and text[match.start(1) - 1] == "-"
+        if not (switch or any(c.isdigit() for c in secret) or len(secret) >= 16 or secret[:1] in "'\""):
+            return match.group(0)
+    return f"{name}{separator}***"
 
 
 def redact(value: Any) -> Any:
@@ -47,7 +71,10 @@ def redact(value: Any) -> Any:
                 return json.dumps(redact(structured), ensure_ascii=False)
         # Unquoted semicolons are ambiguous: mask the whole contiguous value
         # rather than leaking a password suffix as if it were another field.
-        return _SECRET.sub(lambda m: f"{m.group(1)}{m.group(2)}***", value)
+        value = _SECRET.sub(lambda m: _mask(m, value), value)
+        for shape, mask in _SECRET_SHAPES:
+            value = shape.sub(mask, value)
+        return value
     if isinstance(value, list):
         return [redact(item) for item in value]
     if isinstance(value, dict):
@@ -189,8 +216,10 @@ def sync_results(folder: Path, warnings: bool, limit: int) -> dict[str, Any]:
 
 
 def register_tools(tool: Callable[..., Any], session: Session, jobs: Jobs,
-                   state: Path, sql_connect: Callable[..., Any], call_budget: float | None = None) -> None:
-    """`call_budget` (behind a Pond, ServiceConfig.call_limit): no call may outlast it."""
+                   state: Path, sql_connect: Callable[..., Any], call_budget: float | None = None,
+                   guard: Callable[[Callable[..., Any], str], Callable[..., Any]] = lambda fn, role: fn) -> None:
+    """`call_budget` (behind a Pond, ServiceConfig.call_limit): no call may outlast it.
+    `guard(fn, role)` authorizes one action inside a tool that needs a higher role than the tool."""
     def bounded(seconds: float) -> float:
         return min(seconds, call_budget) if call_budget else seconds
 
@@ -216,8 +245,15 @@ def register_tools(tool: Callable[..., Any], session: Session, jobs: Jobs,
         return jobs.start(kind, script)
 
     @tool(RUNS, "writer")
-    def d365_build(module: str, include_reports: bool = False, dry_run: bool = False) -> dict[str, Any]:
-        """Build a package (X++ compile and labels) as a job; dry_run shows the command only."""
+    def d365_build(
+        module: Annotated[str, Field(
+            description="D365 package name.",
+            json_schema_extra={"pattern": f"^{NAME.pattern}$"},
+        )],
+        include_reports: Annotated[bool, Field(description="Also build reports.")] = False,
+        dry_run: Annotated[bool, Field(description="Show the command without starting the job.")] = False,
+    ) -> dict[str, Any]:
+        """Start a package build job. Poll d365_job, then read diagnostics with d365_results(kind=compile)."""
         name = checked_name("module", module)
         logs = state / "d365-logs" / name
         if not dry_run:
@@ -228,9 +264,20 @@ def register_tools(tool: Callable[..., Any], session: Session, jobs: Jobs,
         return act("build", script, dry_run)
 
     @tool(READ_ONLY, "reader")
-    def d365_results(module: str | None = None, kind: str = "compile", warnings: bool | None = None,
-                     limit: int = COMPILER_ROWS_DEFAULT) -> dict[str, Any]:
-        """Last compile, best_practice (of a module) or sync: totals, then errors (and warnings) as rows."""
+    def d365_results(
+        module: Annotated[str | None, Field(
+            description="Package name. Required for compile and best_practice. Ignored for sync.",
+        )] = None,
+        kind: Annotated[str, Field(json_schema_extra={"enum": KINDS})] = "compile",
+        warnings: Annotated[bool | None, Field(
+            description="Include warnings. Defaults to true for best_practice, false otherwise.",
+        )] = None,
+        limit: Annotated[int, Field(
+            description="Maximum diagnostic rows.",
+            json_schema_extra={"minimum": 1, "maximum": COMPILER_ROWS_MAX},
+        )] = COMPILER_ROWS_DEFAULT,
+    ) -> dict[str, Any]:
+        """Read the latest compile, best-practice or sync diagnostics. Match the result's file and time to your run."""
         if not 1 <= limit <= COMPILER_ROWS_MAX:
             raise Refused("invalid_request", f"limit must be 1-{COMPILER_ROWS_MAX}")
         if kind not in KINDS:
@@ -284,8 +331,14 @@ def register_tools(tool: Callable[..., Any], session: Session, jobs: Jobs,
         return result
 
     @tool(RUNS, "writer")
-    def d365_db_sync(modules: list[str] | None = None, dry_run: bool = False) -> dict[str, Any]:
-        """Synchronize the database as a job (given packages, or all); then d365_results kind=sync."""
+    def d365_db_sync(
+        modules: Annotated[list[str] | None, Field(
+            description="Package names. Omit or pass an empty list for a full sync.",
+            json_schema_extra={"items": {"type": "string", "pattern": f"^{NAME.pattern}$"}},
+        )] = None,
+        dry_run: Annotated[bool, Field(description="Show the command without starting the job.")] = False,
+    ) -> dict[str, Any]:
+        """Start a database sync job. Poll d365_job, then read the sync log with d365_results(kind=sync)."""
         logs = state / "d365-logs" / "sync"
         if modules:
             names = ",".join(ps_quote(checked_name("module", m)) for m in modules)
@@ -306,8 +359,18 @@ def register_tools(tool: Callable[..., Any], session: Session, jobs: Jobs,
         return jobs.start("sync", script, prepare=prepare)
 
     @tool(RUNS, "writer")
-    def d365_best_practice(module: str, model: str, dry_run: bool = False) -> dict[str, Any]:
-        """Run best practice checks on a model as a job; dry_run shows the command only."""
+    def d365_best_practice(
+        module: Annotated[str, Field(
+            description="D365 package name.",
+            json_schema_extra={"pattern": f"^{NAME.pattern}$"},
+        )],
+        model: Annotated[str, Field(
+            description="Model within the package.",
+            json_schema_extra={"pattern": f"^{NAME.pattern}$"},
+        )],
+        dry_run: Annotated[bool, Field(description="Show the command without starting the job.")] = False,
+    ) -> dict[str, Any]:
+        """Start a model check job. Poll d365_job, then call d365_results(kind=best_practice)."""
         name = checked_name("module", module)
         logs = state / "d365-logs" / name
         if not dry_run:
@@ -317,9 +380,24 @@ def register_tools(tool: Callable[..., Any], session: Session, jobs: Jobs,
         return act("best_practice", script, dry_run)
 
     @tool(RUNS, "writer")
-    def d365_run(command: str, timeout: int = min(RUN_TIMEOUT_DEFAULT, run_max), background: bool = False,
-                 max_chars: int = RUN_OUTPUT_DEFAULT) -> dict[str, Any]:
-        """Run d365fo.tools; timeout bounds foreground only (default up to 60 s); background returns a job. Credentials masked."""
+    def d365_run(
+        command: Annotated[str, Field(
+            description="d365fo.tools command or short PowerShell script.",
+            json_schema_extra={"minLength": 1, "maxLength": RUN_COMMAND_CHARS},
+        )],
+        timeout: Annotated[int, Field(
+            description=(
+                "Foreground seconds, 1–600 with a lower service cap where configured. Ignored in "
+                "the background."
+            ),
+        )] = min(RUN_TIMEOUT_DEFAULT, run_max),
+        background: Annotated[bool, Field(description="Return a job ID instead of waiting for output.")] = False,
+        max_chars: Annotated[int, Field(
+            description="Maximum foreground output characters.",
+            json_schema_extra={"minimum": 1, "maximum": RUN_OUTPUT_MAX},
+        )] = RUN_OUTPUT_DEFAULT,
+    ) -> dict[str, Any]:
+        """Run PowerShell in the D365 session. For a background run, poll d365_job. Output masks labelled credentials."""
         # d365fo.tools: https://github.com/d365collaborative/d365fo.tools/wiki. Labelled credentials
         # (password=, pwd, secret, sig, ...) are masked before the output is cut; unlabelled text cannot be.
         if not command.strip() or len(command) > RUN_COMMAND_CHARS:
@@ -341,10 +419,28 @@ def register_tools(tool: Callable[..., Any], session: Session, jobs: Jobs,
             result["truncated"] = True
         return result
 
-    @tool(WRITES, "writer")
-    def d365_job(job_id: str | None = None, tail_lines: int = TAIL_LINES_DEFAULT, stop: bool = False,
-                 wait_seconds: float = 0) -> dict[str, Any]:
-        """Job state/tail; wait_seconds 0-60 observes, stop=true requests termination. No id: list. Stop may change state."""
+    # Reading a job is reader work (THREAT_MODEL: readers read jobs); stopping one changes state.
+    stop_job = guard(jobs.stop, "writer")
+
+    @tool(WRITES, "reader")
+    def d365_job(
+        job_id: Annotated[str | None, Field(
+            description="ID returned by a D365 job tool.",
+            json_schema_extra={"pattern": "^[0-9a-f]{12}$"},
+        )] = None,
+        tail_lines: Annotated[int, Field(
+            description="Output lines to keep, 1–400 when a job ID is given.",
+        )] = TAIL_LINES_DEFAULT,
+        stop: Annotated[bool, Field(description="Request termination. Requires job_id and zero wait_seconds.")] = False,
+        wait_seconds: Annotated[float, Field(
+            description=(
+                "Seconds to wait for one job. Zero reads status immediately. A service may set a "
+                "lower limit."
+            ),
+            json_schema_extra={"minimum": 0, "maximum": WAIT_SECONDS_MAX},
+        )] = 0,
+    ) -> dict[str, Any]:
+        """Read jobs or wait for one to finish. Omit job_id to list. stop changes job state and needs a writer."""
         if not 0 <= wait_seconds <= wait_max:
             raise Refused("invalid_request", f"wait_seconds must be 0-{wait_max:g} here")
         if job_id is None:
@@ -354,13 +450,71 @@ def register_tools(tool: Callable[..., Any], session: Session, jobs: Jobs,
         if stop and wait_seconds != 0:
             raise Refused("invalid_request", "choose stop or wait, not both")
         check_tail_lines(tail_lines)  # refuse invalid output options before stop can have effects
-        status = jobs.stop(job_id) if stop else jobs.wait(job_id, wait_seconds)
+        status = stop_job(job_id) if stop else jobs.wait(job_id, wait_seconds)
         return {**status, "tail": jobs.tail(job_id, tail_lines)}
 
+    @tool(READ_ONLY, "reader")
+    def d365_logs(
+        source: Annotated[log_sources.LogSource, Field(description=(
+            "batch reads job/task history and infologs. process reads execution messages. iis reads AOSService W3C "
+            "logs. events selects WAS, Application Error, .NET Runtime, IIS-W3SVC-WP, Dynamics*, Management Reporter* "
+            "or text naming AOSService/Batch.exe/w3wp in Application/System. Application Error needs a D365 app/module."))],
+        since: Annotated[StrictInt | str | None, Field(description=(
+            "Start inclusive, 1–43,200 minutes back or an ISO time in the past 30 days. Default 60 minutes. Use ISO since/until for the same window across calls. Minutes move per call."))] = None,
+        level: Annotated[log_sources.LogLevel, Field(description=(
+            "Minimum severity: warning includes errors, all includes every level. For batch, error matches "
+            "status Error or error infolog entries. A Finished task can carry errors. "
+            "Use status=error for failed tasks only."))] = "error",
+        contains: Annotated[str | None, Field(description=(
+            "Case-insensitive substring of text, captions, process names or IIS paths. At most 1,000 characters."))] = None,
+        group: Annotated[bool, Field(description=(
+            "Group repeats with first, last, distinct variants. count counts records/tasks, not distinct business "
+            "failures. Normalize numbers, GUIDs and times."))] = True,
+        limit: Annotated[StrictInt, Field(description="Maximum result rows, 1–500.",
+                                         json_schema_extra={"minimum": 1, "maximum": log_sources.LIMIT_MAX})] = log_sources.LIMIT_DEFAULT,
+        max_chars: Annotated[StrictInt, Field(description=(
+            "Maximum JSON row-array characters, 1–262,144."),
+                  json_schema_extra={"minimum": 1, "maximum": log_sources.CHARS_MAX})] = log_sources.CHARS_DEFAULT,
+        until: Annotated[StrictInt | str | None, Field(description=(
+            "End exclusive, 1–43,200 minutes back or an ISO time in the past 30 days. Defaults to now."))] = None,
+        job: Annotated[str | None, Field(description=(
+            "Batch or process only. Case-insensitive substring of a job/task caption or process name, up to 200 characters."))] = None,
+        status: Annotated[str | None, Field(description=(
+            "Batch only. Case-insensitive task status (" + ", ".join(log_sources.BATCH_STATUS_CODES) + ")."))] = None,
+        until_skip: Annotated[StrictInt | None, Field(description=(
+            "Scan-note cursor: includes until, skips this many rows already seen there."),
+            json_schema_extra={"minimum": 0, "maximum": log_sources.SKIP_MAX})] = None,
+    ) -> dict[str, Any]:
+        """Read one D365 log source (UTC). Read-only. A cut scan's note gives until/until_skip."""
+        result = log_sources.read_logs(source, since, level, contains, group, limit, max_chars,
+                                       sql_connect, bounded(20), redact, session, until=until, job=job, status=status,
+                                       until_skip=until_skip)
+        return {"server": {"name": "d365", "version": __version__}, **result}
+
     @tool(WRITES, "writer")
-    def d365_sql(sql: str, max_rows: int = sqlserver.ROWS_DEFAULT, timeout: int = sqlserver.TIMEOUT_DEFAULT,
-                 atomic: bool = False, database: str = "AxDB") -> dict[str, Any]:
-        """SQL on this box's database (GO batches): rows as JSON. Meant for test setup and checks."""
+    def d365_sql(
+        sql: Annotated[str, Field(
+            description="SQL script. Put GO on its own line between batches.",
+            json_schema_extra={"minLength": 1, "maxLength": 1_000_000},
+        )],
+        max_rows: Annotated[int, Field(
+            description="Maximum rows per result set.",
+            json_schema_extra={"minimum": 1, "maximum": sqlserver.ROWS_MAX},
+        )] = sqlserver.ROWS_DEFAULT,
+        timeout: Annotated[int, Field(
+            description=(
+                "Seconds for the entire script. A service may set a lower limit and shorten the "
+                "60-second default."
+            ),
+            json_schema_extra={"minimum": 1, "maximum": sqlserver.TIMEOUT_MAX},
+        )] = sqlserver.TIMEOUT_DEFAULT,
+        atomic: Annotated[bool, Field(description="Run all batches in one transaction.")] = False,
+        database: Annotated[str, Field(
+            description="SQL database on the configured instance.",
+            json_schema_extra={"pattern": f"^{sqlserver.DATABASE.pattern}$"},
+        )] = "AxDB",
+    ) -> dict[str, Any]:
+        """Run SQL against the box database. The script can write. Read row sets or affected counts for each GO batch."""
         started = time.monotonic()  # `timeout` bounds the whole script: no batch starts after it
         if timeout == sqlserver.TIMEOUT_DEFAULT:  # the default fits the Pond's bound (schema unchanged)
             timeout = min(timeout, sql_max)

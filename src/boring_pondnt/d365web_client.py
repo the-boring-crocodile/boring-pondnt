@@ -17,6 +17,7 @@ keeps running and the call answers {"status": "running"}; web_wait collects the 
 from __future__ import annotations
 
 import json
+from importlib import resources
 import os
 import re
 import threading
@@ -29,10 +30,13 @@ from typing import Any, Callable
 from urllib.parse import parse_qs, quote, urlsplit
 
 from . import scenario_values
+from .d365whsapp_steplog import SECRET_NAME_PATTERN, MASK, secret
 from .collect import Run, Runs, StillRunning  # noqa: F401 -- StillRunning: d365web's callers catch it here
+from . import d365web_model
 from .d365web_browser import Browser, BrowserError, Page
 
 PROFILE_NAME = re.compile(r"^[A-Za-z0-9_-]{1,40}$")
+MENU_KINDS = ("display", "action", "output")
 MENU_ITEM = re.compile(r"^(?:(?:display|action|output):)?[A-Za-z0-9_]{1,81}$")
 FIELD_KEY = re.compile(r"^(?P<name>.+?)(?:\[(?P<nth>\d{1,3})\])?$")
 SETTLE_SECONDS = 0.4
@@ -66,6 +70,7 @@ class Config:
     idle_minutes: float = 30.0
     step_timeout: float = 600.0  # D365 forms and postings can run for minutes; web_wait collects
     debug_port: int = 0  # fixed loopback port: an Edge that outlives the server is found again
+    backend: str = "model"  # model: D365's control viewmodels; input: synthetic clicks and keys (d365web_model)
 
     @classmethod
     def load(cls, path: Path) -> "Config":
@@ -86,6 +91,8 @@ class Config:
             raise ValueError(f"debug_port must be 1024..65535: {self.debug_port!r}")
         if self.company and not re.match(r"^[A-Za-z0-9]{1,8}$", self.company):
             raise ValueError(f"company must be a D365 company id: {self.company!r}")
+        if self.backend not in d365web_model.BACKENDS:
+            raise ValueError(f"backend must be one of {list(d365web_model.BACKENDS)}: {self.backend!r}")
         if not PROFILE_NAME.match(self.profile):
             raise ValueError(f"profile must match {PROFILE_NAME.pattern}: {self.profile!r}")
         self.url = f"https://{parts.netloc}"
@@ -97,497 +104,27 @@ class Config:
 # --- the page-side library --------------------------------------------------------------------------
 # Called as (LIB)(op, args). Returns plain JSON. Kept free of D365 globals except $dyn.clientBusy.
 
-LIB = r"""(function (op, a) {
-  const GRID = '[data-dyn-role=ReactList], [data-dyn-role=Grid]';
-  const TAB_ROLES = new Set(['AppBarTab', 'TabPage', 'SectionPage', 'Tab', 'PivotItem']);
-  const TAB = Array.from(TAB_ROLES, r => '[data-dyn-role=' + r + ']').join(',');
-  const FIELD_ROLES = new Set(['Input', 'Real', 'Integer', 'Int64', 'Date', 'DateTime', 'Time', 'ComboBox',
-    'CheckBox', 'SegmentedEntry', 'MultilineInput', 'Guid', 'RadioButton', 'QuickFilter', 'StaticText']);
-  const BUTTON_ROLES = new Set(['CommandButton', 'MenuItemButton', 'Button', 'DropDialogButton', 'MenuButton',
-    'ToggleButton', 'MenuItem']);
-  // an open menu button flyout ("Save and open" etc.) lives outside the form/dialog it belongs to
-  const openMenus = () => Array.from(document.querySelectorAll('.flyoutButton-flyOut[role=menu], [role=menu].sysPopup'))
-    .filter(e => vis(e) && e.querySelector('[data-dyn-controlname]'));
-  const vis = (e) => {
-    if (!e || !e.getBoundingClientRect) return false;
-    const r = e.getBoundingClientRect();
-    if (r.width < 2 || r.height < 2) return false;
-    const s = getComputedStyle(e);
-    return s.visibility !== 'hidden' && s.display !== 'none';
-  };
-  const text = (e) => ((e && (e.innerText || e.textContent)) || '').replace(/\s+/g, ' ').trim();
-  const cname = (e) => e.getAttribute('data-dyn-controlname') || '';
-  const drole = (e) => e.getAttribute('data-dyn-role') || '';
-  const area = (e) => { const r = e.getBoundingClientRect(); return r.width * r.height; };
-  const byPos = (x, y) => { const p = x.getBoundingClientRect(), q = y.getBoundingClientRect();
-    return Math.abs(p.top - q.top) > 4 ? p.top - q.top : p.left - q.left; };
-  const inView = (e) => {
-    const g = e.parentElement && e.parentElement.closest(GRID);
-    if (!g) return true;
-    const r = e.getBoundingClientRect(), b = g.getBoundingClientRect();
-    return r.bottom > b.top + 1 && r.top < b.bottom - 1;
-  };
-  const inputOf = (e) => e.matches('input:not([type=checkbox]):not([type=radio]), textarea, select') ? e
-    : e.querySelector('input:not([type=hidden]):not([type=checkbox]):not([type=radio]), textarea, select');
-  // a checkbox or a toggle (span.toggle-box[role=switch] drawn over a zero-size span[role=checkbox]):
-  // click what is visible, read the state from either
-  const CHECK = '[role=checkbox], [role=switch], input[type=checkbox]';
-  const checkOf = (e) => {
-    if (e.matches(CHECK)) return e;
-    const all = Array.from(e.querySelectorAll(CHECK));
-    return all.find(vis) || all[0] || null;
-  };
-  const isCheck = (e) => drole(e) === 'CheckBox' || (!!checkOf(e) && !inputOf(e));
-  const checked = (e) => { const all = e.matches(CHECK) ? [e] : Array.from(e.querySelectorAll(CHECK));
-    return all.some(c => c.getAttribute('aria-checked') === 'true' || c.checked === true); };
-  const firstLine = (e) => ((e && (e.innerText || e.textContent)) || '').split('\n').map(x => x.trim()).filter(Boolean)[0] || '';
-  // A tab contains content as well as its header. Never borrow a nested tab's header or
-  // a link/button from the content; an unknown or ambiguous header must not dispatch a click.
-  const tabHeader = (e) => {
-    if (e.matches('button, [role=tab]')) return vis(e) ? e : null;
-    if (drole(e) === 'PivotItem') {
-      // Pivot headers are siblings of their panels. Follow the explicit reciprocal ARIA
-      // association inside the same form/dialog, even when the inactive panel is hidden.
-      const ids = (e.getAttribute('aria-labelledby') || '').trim().split(/\s+/).filter(Boolean);
-      const owner = '[data-dyn-role=Form], [data-dyn-role=Popup], [role=dialog], [role=alertdialog]';
-      const headers = ids.map(id => document.getElementById(id))
-        .filter(h => h && h.matches('[role=tab]') && vis(h) && e.id &&
-          h.getAttribute('aria-controls') === e.id && e.closest(owner) &&
-          h.closest(owner) === e.closest(owner));
-      return headers.length === 1 ? headers[0] : null;
-    }
-    const headers = Array.from(e.querySelectorAll('.appBarTab-header, .section-page-caption, [role=tab]'))
-      .filter(h => h.closest(TAB) === e && vis(h));
-    if (headers.length) return headers.length === 1 ? headers[0] : null;
-    const direct = Array.from(e.children)
-      .filter(h => h.matches('button[aria-expanded], [data-dyn-role=TabPageHeader], [data-dyn-role=SectionPageHeader]'))
-      .map(h => h.matches('button') ? h : (h.querySelector('button, [role=tab]') || h)).filter(vis);
-    return direct.length === 1 ? direct[0] : null;
-  };
-  const controlVisible = (e) => vis(e) || (drole(e) === 'PivotItem' && !!tabHeader(e));
-  const labelOf = (e) => {
-    const role = drole(e);
-    if (TAB_ROLES.has(role)) return e.getAttribute('aria-label') || firstLine(tabHeader(e));
-    const l = e.querySelector('label');
-    const i = inputOf(e);
-    return (l && text(l)) || e.getAttribute('aria-label') || (i && i.getAttribute('aria-label')) ||
-      e.getAttribute('title') || (BUTTON_ROLES.has(drole(e)) || drole(e) === 'AppBarTab' ? text(e) : '') || '';
-  };
-  const valueOf = (e) => {
-    if (isCheck(e)) return checked(e) ? 'Yes' : 'No';
-    const i = inputOf(e);
-    return i ? (i.value || '') : text(e);
-  };
-  const readOnly = (e) => {
-    if (isCheck(e)) { const c = checkOf(e); return !!c && (c.getAttribute('aria-readonly') === 'true' || c.disabled === true || c.getAttribute('aria-disabled') === 'true'); }
-    const i = inputOf(e);
-    return !i || i.readOnly || i.disabled || i.getAttribute('aria-readonly') === 'true';
-  };
-  const enabled = (e) => {
-    const b = TAB_ROLES.has(drole(e)) ? tabHeader(e) : (e.matches('button') ? e : (e.querySelector('button') || e));
-    return !!b && !(b.disabled || e.getAttribute('aria-disabled') === 'true' || b.getAttribute('aria-disabled') === 'true' ||
-      e.classList.contains('disabled'));
-  };
-  const isLink = (c) => !!c.querySelector('a, [role=link], [class*=yperlink]');
+# The page-side library: one expression, called as (LIB)(op, args, secretNamePattern); returns plain JSON.
+# Kept in its own file (d365web_lib.js) so it reads, diffs and lints as JavaScript.
+LIB = (resources.files(__package__) / "d365web_lib.js").read_text(encoding="utf-8").strip()
 
-  function scope() {
-    const pops = Array.from(document.querySelectorAll('[data-dyn-role=Popup]')).filter(vis);
-    if (pops.length) { const el = pops[pops.length - 1];
-      return {el, kind: el.classList.contains('lookup-popup') ? 'lookup' : 'popup'}; }
-    // a hover preview of a linked record (form *_AutoEnhancedPreview_*) is not a dialog to work in
-    const dialogs = Array.from(document.querySelectorAll('[role=dialog], [role=alertdialog]')).filter(vis)
-      .filter(d => !/EnhancedPreview/i.test(formName(d)));
-    if (dialogs.length) return {el: dialogs[dialogs.length - 1], kind: 'dialog'};
-    const forms = Array.from(document.querySelectorAll('[data-dyn-role=Form]')).filter(vis);
-    if (forms.length) return {el: forms.reduce((x, y) => area(y) > area(x) ? y : x), kind: 'form'};
-    return {el: document.body, kind: 'page'};
-  }
-  const formName = (el) => el.getAttribute('data-dyn-form-name') || el.getAttribute('data-dyn-formname') ||
-    ((el.querySelector('[data-dyn-form-name]') || {getAttribute: () => ''}).getAttribute('data-dyn-form-name')) || '';
 
-  // D365 moves an unpinned tab's content under BODY. Its flyout retains the tab's ID plus
-  // "_flyout"; only an expanded tab inside this scope may contribute that detached root.
-  function scopeRoots(root) {
-    const roots = [root];
-    for (const tab of root.querySelectorAll('[data-dyn-role=AppBarTab]')) {
-      const head = tabHeader(tab);
-      if (!tab.id || !vis(tab) || !head || head.getAttribute('aria-expanded') !== 'true') continue;
-      const flyout = document.getElementById(tab.id + '_flyout');
-      if (flyout && flyout.classList.contains('appBar-flyout') && vis(flyout) &&
-          flyout.getAttribute('aria-hidden') !== 'true' && !root.contains(flyout)) roots.push(flyout);
-    }
-    return roots;
-  }
-  const queryScope = (root, selector) => Array.from(new Set(scopeRoots(root)
-    .flatMap(r => Array.from(r.querySelectorAll(selector)))));
+def iso_matches(want: str, raw: str) -> bool:
+    """D365's raw value of a date (2026-11-20, 2026-11-20T00:00:00) or date-time holds the ISO value set."""
+    raw = raw.strip()
+    if raw == want:
+        return True
+    if not raw.startswith(want):
+        return False
+    rest = raw[len(want):]
+    # a date may carry a midnight time; a date-time given to the minute may carry zero seconds
+    return rest[:1] in (("T",) if "T" not in want else (":", ".", "Z")) and not rest[1:].strip("0:.Z")
 
-  function messages() {
-    const out = [], seen = new Set();
-    for (const s of document.querySelectorAll('[data-dyn-role=MessageBarSection]')) {
-      if (!vis(s)) continue;
-      const m = /messageBarSection-(\w+)/.exec(s.className.toString());
-      const severity = m ? m[1].toLowerCase() : 'info';
-      const region = s.querySelector('.messageBar-messageRegion') || s;
-      const items = Array.from(region.querySelectorAll('li')).map(text).filter(Boolean);
-      for (const t of (items.length ? items : [text(region)])) {
-        if (!t || seen.has(severity + t)) continue;
-        seen.add(severity + t);
-        out.push({severity, text: t.slice(0, 8000)});
-      }
-    }
-    return out;
-  }
 
-  function gridRows(g) {
-    const rows = Array.from(g.querySelectorAll('[role=row]'));
-    let header = null; const body = [];
-    for (const r of rows) {
-      const isHeader = !!r.querySelector('[role=columnheader]') || (!header && !body.length && !r.querySelector('input'));
-      if (isHeader) { if (!header) header = r; continue; }
-      if (vis(r) && inView(r)) body.push(r);
-    }
-    body.sort(byPos);
-    return {header, body};
-  }
-  function cellsOf(r) {
-    return Array.from(r.querySelectorAll('[role=gridcell], [role=columnheader]')).filter(vis);
-  }
-  function cellName(c) { const n = c.matches('[data-dyn-controlname]') ? c : c.querySelector('[data-dyn-controlname]'); return n ? cname(n) : ''; }
-  function cellValue(c) { const n = c.querySelector('[data-dyn-controlname]') || c; return valueOf(n); }
-  function readGrid(g, maxRows) {
-    const {header, body} = gridRows(g);
-    let columns = header ? cellsOf(header).map(c => ({name: cellName(c), label: text(c)})) : [];
-    if (!columns.length && body.length) columns = cellsOf(body[0]).map(c => ({name: cellName(c), label: ''}));
-    const keep = columns.map(c => !!(c.name || c.label));
-    const rows = body.slice(0, maxRows).map((r, i) => {
-      const cells = cellsOf(r);
-      const values = columns.map((col, k) => {
-        const c = cells.find(x => col.name && cellName(x) === col.name) || cells[k];
-        return c ? cellValue(c) : '';
-      }).filter((v, k) => keep[k]);
-      const row = {row: i, values};
-      const key = r.getAttribute('aria-rowindex') || r.getAttribute('data-dyn-row');
-      if (key) row.key = key;
-      if (r.getAttribute('aria-selected') === 'true' || /selected|activeRow/i.test(r.className.toString())) row.selected = true;
-      return row;
-    });
-    const total = g.getAttribute('aria-rowcount') || (g.querySelector('[aria-rowcount]') || {getAttribute: () => null}).getAttribute('aria-rowcount');
-    const out = {name: cname(g), columns: columns.filter((c, k) => keep[k]), rows, visible_rows: body.length};
-    if (total) out.rowcount_hint = Number(total);
-    return out;
-  }
-  // D365 grids render only the rows near the visible area: scrolling their container (like a person)
-  // brings the next rows into the DOM. The scroller is the grid's tallest scrollable descendant.
-  function scrollerOf(g) {
-    let best = null;
-    for (const e of [g, ...g.querySelectorAll('*')]) {
-      if (e.scrollHeight <= e.clientHeight + 4) continue;
-      const oy = getComputedStyle(e).overflowY;
-      if ((oy === 'auto' || oy === 'scroll') && (!best || e.clientHeight > best.clientHeight)) best = e;
-    }
-    return best;
-  }
-  function findGrid(root, name) {
-    const grids = queryScope(root, GRID).filter(vis);
-    return name ? grids.find(g => cname(g) === name) : grids.sort((x, y) => area(y) - area(x))[0];
-  }
-
-  function controls(root, full) {
-    const fieldsOut = [], buttons = [], actionTabs = [], tabs = [], other = [];
-    const count = {};
-    const roots = scopeRoots(root);
-    const all = queryScope(root, '[data-dyn-controlname]').filter(e => controlVisible(e) && inView(e));
-    all.sort(byPos);
-    for (const e of all) {
-      const g = e.parentElement && e.parentElement.closest(GRID);
-      if (g && roots.some(r => r.contains(g))) continue;
-      const role = drole(e), name = cname(e);
-      if (!name) continue;
-      const nth = count[name] = (count[name] === undefined ? 0 : count[name] + 1);
-      const item = {name};
-      if (nth) item.nth = nth;
-      const label = labelOf(e).slice(0, 60);
-      if (label && label !== name) item.label = label;
-      if (FIELD_ROLES.has(role) && (inputOf(e) || isCheck(e) || role === 'StaticText')) {
-        item.value = valueOf(e).slice(0, 200);
-        if (readOnly(e)) item.readonly = true;
-        if (e.querySelector('.statusMandatory') || e.classList.contains('statusMandatory')) item.required = true;
-        if (role !== 'Input') item.role = role;
-        fieldsOut.push(item);
-      } else if (BUTTON_ROLES.has(role)) {
-        if (!enabled(e)) item.disabled = true;
-        buttons.push(item);
-      } else if (role === 'AppBarTab') {
-        actionTabs.push(item);
-      } else if (TAB_ROLES.has(role)) {
-        const head = tabHeader(e);
-        const ex = e.getAttribute('aria-expanded') || (head && head.getAttribute('aria-expanded'));
-        if (ex !== null) item.expanded = ex === 'true';
-        if (head && head.hasAttribute('aria-selected')) item.selected = head.getAttribute('aria-selected') === 'true';
-        tabs.push(item);
-      } else if (full) {
-        item.role = role || e.getAttribute('role') || e.tagName.toLowerCase();
-        const t = text(e).slice(0, 60); if (t) item.text = t;
-        other.push(item);
-      }
-    }
-    if (full) return {fields: fieldsOut, buttons, action_tabs: actionTabs, tabs, other};
-    // compact: name[#nth] -> value; labels only in full mode (press/set also accept labels)
-    const key = (i) => i.nth ? i.name + '[' + i.nth + ']' : i.name;
-    // filter-pane operator buttons carry generated numeric names: noise in the compact view
-    const named = buttons.filter(b => !/^\d+$/.test(b.name));
-    const out = {fields: {}, readonly: {}, buttons: named.filter(b => !b.disabled).map(key),
-      disabled: named.filter(b => b.disabled).map(key),
-      action_tabs: actionTabs.map(t => t.label && t.label !== t.name ? t.name + ' (' + t.label + ')' : t.name),
-      tabs: tabs.map(t => key(t) + (t.label && t.label !== t.name ? ' (' + t.label + ')' : '') + (t.expanded === false ? ' [collapsed]' : ''))};
-    for (const f of fieldsOut) (f.readonly ? out.readonly : out.fields)[key(f)] = f.value;
-    // labels only where the name does not already say it (Proforma -> Posting), to keep the view small
-    const norm = (t) => (t || '').toLowerCase().replace(/[^a-z0-9]/g, '');
-    const labels = {};
-    for (const i of fieldsOut.concat(named)) {
-      if (i.label && !norm(i.name).includes(norm(i.label)) && Object.keys(labels).length < 80) labels[key(i)] = i.label;
-    }
-    if (Object.keys(labels).length) out.labels = labels;
-    const missing = fieldsOut.filter(f => f.required && !f.readonly && !f.value).map(key);
-    if (missing.length) out.missing = missing;
-    return out;
-  }
-
-  function state(full, maxRows) {
-    const sc = scope();
-    const out = {scope: sc.kind, form: formName(sc.el), title: document.title.split(' -- ')[0],
-      busy: typeof $dyn !== 'undefined' && $dyn.clientBusy ? !!$dyn.clientBusy() : null, messages: messages()};
-    const cap = Array.from(sc.el.querySelectorAll('.titleField')).filter(vis)[0];
-    if (cap && text(cap)) out.caption = text(cap).slice(0, 200);
-    if (sc.kind === 'dialog' || sc.kind === 'popup') out.dialog_text = text(sc.el).slice(0, 400);
-    Object.assign(out, controls(sc.el, full));
-    out.grids = queryScope(sc.el, GRID).filter(vis).map(g => readGrid(g, maxRows));
-    const menu = [];
-    for (const m of openMenus()) for (const e of m.querySelectorAll('[data-dyn-controlname]')) {
-      if (!vis(e)) continue;
-      const n = cname(e), l = labelOf(e) || text(e);
-      menu.push(l && l !== n ? n + ' (' + l + ')' : n);
-    }
-    if (menu.length) out.menu = menu;
-    const counter = document.querySelector('.messageCenter-counter');
-    if (counter && text(counter) && text(counter) !== '0') out.notifications = Number(text(counter)) || text(counter);
-    return out;
-  }
-
-  function similar(root, name) {
-    const want = name.toLowerCase().replace(/[^a-z0-9]/g, '');
-    const out = new Set();
-    for (const e of queryScope(root, '[data-dyn-controlname]')) {
-      if (!vis(e)) continue;
-      const n = cname(e), l = labelOf(e);
-      const k = (n + ' ' + l).toLowerCase().replace(/[^a-z0-9 ]/g, '');
-      if (want && k.replace(/ /g, '').includes(want)) out.add(l && l !== n ? n + ' (' + l + ')' : n);
-      if (out.size >= 12) break;
-    }
-    return Array.from(out);
-  }
-
-  function candidates(root, name, kind) {
-    const all = queryScope(root, '[data-dyn-controlname]');
-    let c = all.filter(e => cname(e) === name);
-    const visible = kind === 'field' ? vis : controlVisible;
-    if (!c.filter(visible).length) {
-      const want = name.trim().toLowerCase();
-      c = all.filter(e => labelOf(e).trim().toLowerCase() === want);
-    }
-    const hidden = c.length;
-    c = c.filter(e => visible(e) && inView(e) && !e.closest('[role=columnheader]'));
-    if (kind === 'field') c = c.filter(e => !TAB_ROLES.has(drole(e)) && (inputOf(e) || isCheck(e)));
-    c = c.filter(e => !c.some(o => o !== e && e.contains(o)));
-    c.sort(byPos);
-    return {list: c, hidden: hidden - c.length};
-  }
-
-  function locate(name, nth, kind) {
-    const sc = scope();
-    let {list, hidden} = candidates(sc.el, name, kind);
-    if (kind !== 'field') {  // an open menu's items take precedence over the scope's buttons
-      for (const m of openMenus()) {
-        const hit = candidates(m, name, kind);
-        if (hit.list.length) { list = hit.list; hidden = 0; break; }
-      }
-    }
-    if (!list[nth]) return {error: 'not_found', scope: sc.kind, form: formName(sc.el), count: list.length,
-      hidden_matches: hidden, similar: similar(sc.el, name)};
-    const e = list[nth], tab = kind !== 'field' && TAB_ROLES.has(drole(e));
-    const head = tab ? tabHeader(e) : null;
-    if (tab && !head) return {error: 'not_found', reason: 'tab_header_unavailable', control: cname(e),
-      role: drole(e), scope: sc.kind, form: formName(sc.el)};
-    let target = e;
-    // a hyperlink (grid cells: input.dyn-hyperlink) reacts only on its text, which starts at the left
-    const link = kind === 'field' || tab ? null : (e.matches('.dyn-hyperlink, a') ? e : e.querySelector('.dyn-hyperlink, a'));
-    if (kind === 'field') target = isCheck(e) ? (checkOf(e) || e) : inputOf(e);
-    else if (tab) target = head;
-    else if (link) target = link;
-    else if (!e.matches('button')) target = e.querySelector('button') || e;
-    target.scrollIntoView({block: 'nearest', inline: 'nearest'});
-    const r = target.getBoundingClientRect();
-    const x = link ? r.left + Math.min(14, r.width / 2) : r.left + r.width / 2;
-    const out = {x, y: r.top + r.height / 2, count: list.length, role: drole(e),
-      control: cname(e), scope: sc.kind};
-    // what a click at (x, y) would really hit: a teaching tip or other popup can lie over the control
-    const hit = document.elementFromPoint(x, out.y);
-    if (hit && !(tab ? target.contains(hit) : (e.contains(hit) || target.contains(hit) || hit.contains(target)))) {
-      const tip = hit.closest('.qtip');
-      out.covered = {by: ((hit.closest('[data-dyn-controlname]') && cname(hit.closest('[data-dyn-controlname]'))) ||
-        (hit.className || '').toString().slice(0, 60) || hit.tagName), tip: tip ? tip.id : '',
-        text: firstLine(tip || hit).slice(0, 80)};
-    }
-    if (kind === 'field') { out.check = isCheck(e); out.value = valueOf(e); out.readonly = readOnly(e); }
-    else out.enabled = enabled(e);
-    return out;
-  }
-
-  function rowTarget(gridName, index, match) {
-    const sc = scope();
-    const g = findGrid(sc.el, gridName);
-    if (!g) return {error: 'not_found', what: 'grid', scope: sc.kind,
-      grids: Array.from(sc.el.querySelectorAll(GRID)).filter(vis).map(cname)};
-    const {header, body} = gridRows(g);
-    const labels = header ? cellsOf(header).map(c => [cellName(c), text(c).toLowerCase()]) : [];
-    let row = null;
-    if (match) {
-      const keys = Object.keys(match);
-      row = body.find(r => keys.every(k => {
-        const want = String(match[k]).trim().toLowerCase();
-        const cells = cellsOf(r);
-        if (k === '*') return cells.some(c => cellValue(c).trim().toLowerCase() === want);
-        let c = cells.find(x => cellName(x) === k);
-        if (!c) { const i = labels.findIndex(l => l[1] === k.toLowerCase()); if (i >= 0) c = cells.find(x => cellName(x) === labels[i][0]) || cells[i]; }
-        return !!c && cellValue(c).trim().toLowerCase() === want;
-      }));
-    } else row = body[index];
-    if (!row) return {error: 'not_found', what: 'row', grid: cname(g), visible_rows: body.length};
-    const cells = cellsOf(row).filter(c => cellName(c));
-    const plain = cells.find(c => !isLink(c));
-    if (!plain && cells.length) {
-      // only hyperlink cells (a list pane with one linked column, e.g. the menu items of a setup form):
-      // their text opens the record, it does not select the row (test box, 2026-10-26: the next Delete
-      // landed on the opened record). Click a point of the row that no link covers, or refuse.
-      row.scrollIntoView({block: 'nearest', inline: 'nearest'});
-      const rr = row.getBoundingClientRect(), y = rr.top + rr.height / 2;
-      const linkAt = (e) => !!(e && e.closest('a, [role=link], [class*=yperlink]'));
-      for (let x = rr.right - 6; x > rr.left + 4; x -= 12) {
-        const hit = document.elementFromPoint(x, y);
-        if (hit && row.contains(hit) && !linkAt(hit)) return {x, y, grid: cname(g), row: body.indexOf(row), cell: ''};
-      }
-      return {error: 'links_only', grid: cname(g), row: body.indexOf(row), cells: cells.map(cellName)};
-    }
-    const cell = plain || row;
-    cell.scrollIntoView({block: 'nearest', inline: 'nearest'});
-    const r = cell.getBoundingClientRect();
-    return {x: r.left + Math.min(r.width / 2, 40), y: r.top + r.height / 2, grid: cname(g), row: body.indexOf(row),
-      cell: cellName(cell)};
-  }
-
-  function status() {
-    if (/(^|\.)login\.(microsoftonline|live|windows)\.(com|net)$/.test(location.hostname)) return 'signin';
-    if (location.href === 'about:blank') return 'idle';
-    if (document.readyState !== 'complete') return 'busy';
-    if (typeof $dyn === 'undefined' || !$dyn.clientBusy) return 'busy';
-    if ($dyn.clientBusy()) return 'busy';
-    // "Processing operation" (a SysBoxForm lightbox with div.progressBar[role=progressbar]) can outlast
-    // clientBusy(); while it runs the main area also carries aria-busy (captured 2026-10-23, journal post)
-    if (Array.from(document.querySelectorAll('.primaryConductor[aria-busy=true]')).some(vis)) return 'busy';
-    const progress = Array.from(document.querySelectorAll('[role=dialog]')).filter(vis)
-      .some(d => d.querySelector('[role=progressbar], [data-dyn-role=ProgressBar]'));
-    return progress ? 'busy' : 'idle';
-  }
-
-  switch (op) {
-    case 'status': return status();
-    case 'state': return state(!!a[0], a[1] || 20);
-    case 'locate': return locate(a[0], a[1] || 0, a[2] || 'any');
-    case 'grid': { const sc = scope(); const g = findGrid(sc.el, a[0]);
-      return g ? readGrid(g, a[1] || 50) : {error: 'not_found', what: 'grid', scope: sc.kind,
-        grids: Array.from(sc.el.querySelectorAll(GRID)).filter(vis).map(cname)}; }
-    case 'row': return rowTarget(a[0] || '', a[1] || 0, a[2] || null);
-    case 'gridScroll': { const sc = scope(); const g = findGrid(sc.el, a[0]);
-      if (!g) return {error: 'not_found', what: 'grid', scope: sc.kind};
-      const s = scrollerOf(g);
-      if (!s) return {scrollable: false};
-      const before = s.scrollTop;
-      s.scrollTop = a[1] === 'top' ? 0 : before + Math.max(24, Math.floor(s.clientHeight * 0.8));
-      s.dispatchEvent(new Event('scroll'));
-      return {scrollable: true, before, after: s.scrollTop, height: s.scrollHeight, client: s.clientHeight}; }
-    case 'scope': { const sc = scope(); return {scope: sc.kind, form: formName(sc.el)}; }
-    case 'tipButton': { const q = document.getElementById(a[0]);
-      if (!q || !vis(q)) return {error: 'gone'};
-      const b = Array.from(q.querySelectorAll('button, [role=button], a')).filter(vis)[0];
-      if (!b) return {error: 'no_button'};
-      const r = b.getBoundingClientRect();
-      return {x: r.left + r.width / 2, y: r.top + r.height / 2, label: firstLine(b).slice(0, 40),
-        text: firstLine(q).slice(0, 80)}; }
-    case 'restPoint': {  // somewhere inert in the current form for the pointer to rest (no link, button, row, tooltip)
-      const sc = scope(), r = sc.el.getBoundingClientRect();
-      const busy = (e) => !e || !!e.closest('a, button, input, textarea, [role=row], [role=link], [role=button], ' +
-        '[role=gridcell], [role=menuitem], [title], [data-dyn-role$=Button], [class*=yperlink]');
-      const xs = [0.98, 0.9, 0.75, 0.5], ys = [0.98, 0.9, 0.75, 0.5];
-      for (const fy of ys) for (const fx of xs) {
-        const x = r.left + (r.width - 2) * fx, y = r.top + (r.height - 2) * fy;
-        if (x < 0 || y < 0 || x >= innerWidth || y >= innerHeight) continue;
-        if (!busy(document.elementFromPoint(x, y))) return {x, y};
-      }
-      return {error: 'none'}; }
-    case 'messages': return messages();
-    case 'labels': { const sc = scope(); const out = {};
-      for (const e of queryScope(sc.el, '[data-dyn-controlname]')) {
-        if (!vis(e)) continue;
-        const l = labelOf(e); if (l && !(cname(e) in out)) out[cname(e)] = l.slice(0, 80); }
-      return out; }
-    case 'comboOption': {
-      const opts = Array.from(document.querySelectorAll('.comboBox-list li[role=option], [role=listbox].comboBox-list [role=option]')).filter(vis);
-      const names = opts.map(o => text(o));
-      const k = names.findIndex(n => n.toLowerCase() === String(a[0]).trim().toLowerCase());
-      if (k < 0) return {error: 'not_found', options: names};
-      // a long list scrolls in its popup: an option below the fold is clipped and its centre lies
-      // outside the visible list, so the click would miss it (Activity code, test box, 2026-10-26)
-      opts[k].scrollIntoView({block: 'nearest'});
-      const r = opts[k].getBoundingClientRect(), x = r.left + r.width / 2, y = r.top + r.height / 2;
-      const hit = document.elementFromPoint(x, y);
-      if (!hit || !(hit === opts[k] || opts[k].contains(hit))) return {error: 'covered', options: names};
-      return {x, y}; }
-    case 'quickfilter': { const sc = scope();
-      const qf = Array.from(sc.el.querySelectorAll('[data-dyn-role=QuickFilter]')).filter(vis)[0];
-      const i = qf && qf.querySelector('input');
-      if (!i) return {error: 'not_found', what: 'quick filter', scope: sc.kind, form: formName(sc.el)};
-      const r = i.getBoundingClientRect(); return {x: r.left + r.width / 2, y: r.top + r.height / 2}; }
-    case 'filteroption': {
-      const opts = Array.from(document.querySelectorAll('.quickFilter-dropdown li[role=option]')).filter(vis);
-      const names = opts.map(o => text(o.querySelector('.quickFilter-listFieldName') || o));
-      const want = (a[0] || '').trim().toLowerCase();
-      const k = want ? names.findIndex(n => n.toLowerCase() === want) : 0;
-      if (k < 0 || !opts[k]) return {error: 'not_found', what: 'filter column', columns: names};
-      const r = opts[k].getBoundingClientRect(); return {x: r.left + r.width / 2, y: r.top + r.height / 2, column: names[k]}; }
-    case 'whsform': {  // the in-form WHS app simulator (action:WHSWorkExecute): its controls by protocol name
-      const f = Array.from(document.querySelectorAll('[data-dyn-form-name=WHSWorkExecute]')).filter(vis).pop();
-      if (!f) return null;
-      const hdr = f.querySelector('.dialog-caption');
-      const skip = /^(SystemDefined|\$Dialog|NonProductionNotification|MinWidth)/;
-      const controls = [];
-      for (const e of f.querySelectorAll('[data-dyn-controlname]')) {
-        const name = cname(e), role = e.getAttribute('data-dyn-role');
-        if (skip.test(name) || role === 'Group' || !vis(e)) continue;
-        const c = {name, role};
-        const inp = e.querySelector('input, textarea');
-        if (inp && role !== 'CommandButton' && role !== 'Button') {
-          c.value = inp.type === 'password' ? '' : inp.value;
-          if (inp.readOnly || inp.disabled) c.readonly = true;
-          const l = labelOf(e); if (l) c.label = l;
-        } else c.text = text(e);
-        if (name === 'error') { const cs = getComputedStyle(e); c.bg = cs.backgroundColor; c.fg = cs.color; }
-        controls.push(c);
-      }
-      return {caption: hdr ? text(hdr) : '', controls};
-    }
-  }
-  return {error: 'unknown op ' + op};
-})"""
+def field_key_explicit(key: str) -> bool:
+    """Whether a field key names its occurrence ('Name[0]'): then no active-row choice is made."""
+    match = FIELD_KEY.match(key.strip())
+    return bool(match and match.group("nth") is not None)
 
 
 def parse_field_key(key: str) -> tuple[str, int]:
@@ -616,9 +153,19 @@ def normalize_values(values: Any) -> list[tuple[str, Any]]:
     return pairs
 
 
+_DATE_OR_TIME = re.compile(r"^\d{1,4}[/.:]\d")
+_THOUSANDS = re.compile(r"^[+-]?\d{1,3}(,\d{3})+(\.\d+)?$")
+
+
 def _number(text: str) -> float | None:
+    """A number as the en-US client shows it; '1,5' is not 15 (a decimal comma is compared as text)."""
+    text = text.strip()
+    if "," in text:
+        if not _THOUSANDS.match(text):
+            return None
+        text = text.replace(",", "")
     try:
-        return float(text.replace(",", "").strip())
+        return float(text)
     except ValueError:
         return None
 
@@ -636,15 +183,22 @@ def value_differs(typed: str, now: str) -> bool:
     x, y = _number(a), _number(b)
     if x is not None and y is not None:
         return x != y
-    return not b.lower().startswith(a.lower())
+    # a segmented entry fills its remaining segments (618160 -> 618160-001---); any other longer value is
+    # a different value (D365 completed ABC to ABC1)
+    if not b.lower().startswith(a.lower()):
+        return True
+    rest = b[len(a):]
+    # 11/6/2026 -> "11/6/2026 12:00:00 am", 10:00 -> "10:00 am": D365 completes a date or a time
+    return not (rest[:1] == "-" or (rest[:1] == " " and _DATE_OR_TIME.match(a) is not None))
 
 
 SCENARIO_STEPS_MAX = 80
 STEP_ARGS = {
     "open": {"menu_item", "company", "kind"}, "state": {"full", "max_rows"}, "set": {"values"},
     "press": {"name", "nth"}, "lookup": {"field", "pick", "nth"}, "filter": {"value", "column"},
-    "select_row": {"grid", "row", "match"}, "key": {"keys"},
+    "select_row": {"grid", "row", "match"}, "key": {"keys"}, "tree": {"tree", "path"},
 }
+TREE_DEPTH_MAX = 20
 STEP_KEYS = {"op", "expect", "save", "note"}
 EXPECT_KEYS = {"scope", "form", "caption", "fields", "editable", "message", "no_errors", "enabled", "disabled", "grid"}
 
@@ -679,13 +233,19 @@ def check_operation(op: str, args: dict[str, Any], *, templates: bool = False) -
     """Static operation arguments, shared by scenario admission and direct entry points.
     Browser-dependent names/availability remain runtime checks."""
     required = {"open": "menu_item", "set": "values", "press": "name", "lookup": "field",
-                "key": "keys"}
+                "key": "keys", "tree": "path"}
     if op in required and required[op] not in args:
         raise D365WebError("refused", f"{op}: missing {required[op]}")
     for name in ("menu_item", "name", "field", "keys"):
         if name in args:
             _step_text(args[name], name)
-    for name in ("company", "kind", "pick", "column", "grid"):
+    if op == "tree":
+        path = args["path"]
+        if not isinstance(path, list) or not 1 <= len(path) <= TREE_DEPTH_MAX:
+            raise D365WebError("refused", f"path: expected a list of 1-{TREE_DEPTH_MAX} node labels, root first")
+        for label in path:
+            _step_text(label, "path")
+    for name in ("company", "kind", "pick", "column", "grid", "tree"):
         if name in args and args[name] is not None:
             _step_text(args[name], name, empty=name != "kind")
     if op == "open":
@@ -700,7 +260,7 @@ def check_operation(op: str, args: dict[str, Any], *, templates: bool = False) -
             raise D365WebError("refused", "menu_item: invalid menu item")
         if company and not re.fullmatch(r"[a-zA-Z0-9]{1,8}", company):
             raise D365WebError("refused", "company: expected 1-8 letters or digits")
-        if kind is not None and kind not in ("display", "action", "output"):
+        if kind is not None and kind not in MENU_KINDS:
             raise D365WebError("refused", "kind: expected display, action or output")
     for name in ("nth", "row", "max_rows"):
         if name in args:
@@ -899,14 +459,18 @@ def extract_variable(state: dict[str, Any], spec: Any) -> str | None:
     elif source == "message":
         text = "\n".join(m["text"] for m in (state.get("new_messages") or state.get("messages") or []))
     elif source.startswith("grid:"):
-        found = _grid_rows(state, spec.get("grid"))
-        if found:
-            columns, rows = found
+        for grid in state.get("grids") or []:
+            if spec.get("grid") and grid.get("name") != spec["grid"]:
+                continue
+            columns, rows = grid.get("columns", []), grid.get("rows", [])
             index = next((i for i, c in enumerate(columns) if c.get("name") == source[5:]
                           or (c.get("label") or "").lower() == source[5:].lower()), None)
+            if index is None:
+                continue
             row = int(spec.get("row", 0))
-            if index is not None and row < len(rows):
+            if 0 <= row < len(rows) and index < len(rows[row]["values"]):
                 text = rows[row]["values"][index]
+            break
     if text is None:
         return None
     if pattern:
@@ -924,6 +488,22 @@ def as_bool(value: str) -> bool:
     if word in FALSE_WORDS:
         return False
     raise D365WebError("refused", f"checkbox value must be yes/no, got {value!r}")
+
+
+def context_moves(before: Any, after: Any) -> list[str] | None:
+    """What moved between two page contexts (the page library's `context`): form (the visible forms),
+    dialog (the one in front), record (caption or a grid's active row), pane (action tab, menu, FastTabs,
+    selected tabs), fields (values or read-only state in the scope). None: a context was unreadable,
+    so nothing can be said either way."""
+    if not isinstance(before, dict) or not isinstance(after, dict) or "error" in before or "error" in after:
+        return None
+    moved = ["form"] if before.get("forms") != after.get("forms") else []
+    return moved + [key for key in ("dialog", "record", "pane", "fields") if before.get(key) != after.get(key)]
+
+
+UNCHANGED_NOTE = ("nothing visible moved (form, dialog, active record, pane, fields, messages, address): D365 "
+                  "may have done nothing, or work that shows nowhere here; inspect (web_state) before "
+                  "pressing again: a business action is never retried for you")
 
 
 BROWSER = "browser"  # WebClient's one run key: one browser, one step at a time
@@ -950,7 +530,10 @@ class WebClient:
         self.runs = Runs(self.executor)  # one key: the browser (collect: answered once, by its collector)
         self.last_used = time.monotonic()
         self.js_dialogs: list[str] = []
+        self.js_dialogs_dismissed: list[str] = []  # confirm/prompt dialogs cancelled during the step
         self.dismissed: list[str] = []  # teaching tips acknowledged during the current step (see _uncover)
+        self.keep_open: Callable[[], bool] | None = None  # true: the idle close waits (another owner's tabs)
+        self._idle_unknown = 0  # idle closes put off because the page did not say whether it holds unsaved changes
         self.stop = threading.Event()
         self.reaper = threading.Thread(target=self._reap_idle, name="d365web-idle", daemon=True)
         self.reaper.start()
@@ -992,7 +575,7 @@ class WebClient:
             if self.browser is not None and idle > self.config.idle_minutes * 60:
                 run = self.runs.get(BROWSER)
                 if run is None or run.future.done():
-                    self.executor.submit(self._close_browser)
+                    self.executor.submit(self._close_idle)
 
     def shutdown(self) -> None:
         self.stop.set()
@@ -1012,7 +595,13 @@ class WebClient:
         for port in ports:
             try:
                 return Browser.attach(port, profile)
-            except (OSError, ValueError, KeyError, BrowserError):
+            except BrowserError as error:
+                if error.code == "foreign" and port == self.config.debug_port:
+                    # launching on that port would end up talking to the same foreign Edge
+                    raise D365WebError("browser", f"another Edge (another profile) uses debugging port {port}; "
+                                       "close it or configure another debug_port") from None
+                continue
+            except (OSError, ValueError, KeyError):
                 continue
         return Browser.launch(profile, headless=self.config.headless, edge=self.config.edge,
                               port=self.config.debug_port)
@@ -1024,8 +613,31 @@ class WebClient:
             targets = self.browser.conn.send("Target.getTargets")["targetInfos"]
             pages = [t for t in targets if t["type"] == "page" and not t.get("url", "").startswith(("edge://", "devtools://", "chrome://"))
                      and "WHSWorkExecute" not in t.get("url", "")]  # the form tabs belong to d365whsapp (D38)
-            self.page = Page(self.browser.conn, pages[0]["targetId"]) if pages else self.browser.new_page()
+            # an attached headed Edge may hold other tabs: prefer the one on this D365
+            ours = [t for t in pages if t.get("url", "").startswith(self.config.url)]
+            chosen = (ours or pages)[:1]
+            self.page = Page(self.browser.conn, chosen[0]["targetId"]) if chosen else self.browser.new_page()
         return self.page
+
+    def _close_idle(self) -> None:
+        """The idle close: never while a form holds unsaved changes (they would be lost without a word).
+        A browser that is gone is closed; a page that does not answer is waited for three times."""
+        if self.browser is None or time.monotonic() - self.last_used <= self.config.idle_minutes * 60:
+            return
+        if self.keep_open is not None and not self.browser.conn.closed and self.keep_open():
+            self.last_used = time.monotonic()  # a tab holds a logged-in session (d365whsapp form mode)
+            return
+        if self.page is not None and not self.browser.conn.closed:
+            try:
+                unsaved = d365web_model.unsaved_forms(lambda op, *a: self._evaluate_lib(op, *a), strict=True)
+            except Exception:  # noqa: BLE001 -- unreadable: as below
+                unsaved = None
+            if unsaved or (unsaved is None and self._idle_unknown < 3):
+                self._idle_unknown = self._idle_unknown + 1 if unsaved is None else 0
+                self.last_used = time.monotonic()  # look again in idle_minutes
+                return
+        self._idle_unknown = 0
+        self._close_browser()
 
     def _close_browser(self) -> dict[str, Any]:
         browser, self.browser, self.page = self.browser, None, None
@@ -1038,7 +650,18 @@ class WebClient:
     # --- page helpers (worker thread only) --------------------------------------------------------
     def _js(self, op: str, *args: Any) -> Any:
         page = self._ensure()
-        return page.evaluate(f"({LIB})({json.dumps(op)}, {json.dumps(list(args))})")
+        if op.startswith("model:"):  # the model backend's library (d365web_model); same route to the page
+            return page.evaluate(f"({d365web_model.MODEL_LIB})({json.dumps(op[6:])}, {json.dumps(list(args))})")
+        return page.evaluate(f"({LIB})({json.dumps(op)}, {json.dumps(list(args))}, {json.dumps(SECRET_NAME_PATTERN)})")
+
+    def _evaluate_lib(self, op: str, *args: Any) -> Any:
+        """_js on the current page only: never launches or attaches a browser (the idle close asks)."""
+        if self.page is None:
+            raise BrowserError("no_page", "no page")
+        library = d365web_model.MODEL_LIB if op.startswith("model:") else LIB
+        name = op[6:] if op.startswith("model:") else op
+        extra = "" if op.startswith("model:") else f", {json.dumps(SECRET_NAME_PATTERN)}"
+        return self.page.evaluate(f"({library})({json.dumps(name)}, {json.dumps(list(args))}{extra})")
 
     def _accept_js_dialogs(self) -> None:
         page = self.page
@@ -1047,9 +670,15 @@ class WebClient:
         with page.events_lock:
             dialogs, page.dialogs = page.dialogs, []
         for dialog in dialogs:
-            self.js_dialogs.append(f"{dialog.get('type', '')}: {dialog.get('message', '')}"[:300])
+            kind = dialog.get("type", "")
+            # A confirm (or prompt) may approve something nobody asked for: cancel it (Wald, 2026-11-07).
+            # An alert only informs; a leave-page question is answered yes, as web_open already refuses
+            # while a form holds unsaved changes.
+            accept = kind not in ("confirm", "prompt")
+            (self.js_dialogs if accept else self.js_dialogs_dismissed).append(
+                f"{kind}: {dialog.get('message', '')}"[:300])
             try:
-                page.send("Page.handleJavaScriptDialog", {"accept": True})
+                page.send("Page.handleJavaScriptDialog", {"accept": accept})
             except BrowserError:
                 pass
 
@@ -1071,10 +700,25 @@ class WebClient:
             time.sleep(0.1)
         return False
 
+    def browser_mode(self) -> dict[str, Any]:
+        actual = self.browser.headless if self.browser is not None else None
+        if actual is None:
+            return {"browser_mode_unknown": True}
+        if actual != self.config.headless:
+            return {"browser_mode_mismatch": {
+                "configured_headless": self.config.headless, "running_headless": actual,
+                "hint": "Finish and collect the current operation, close the service browser, then relaunch.",
+            }}
+        return {}
+
     def _state(self, full: bool = False, max_rows: int = 20, idle: bool = True) -> dict[str, Any]:
         page = self._ensure()
         result: dict[str, Any] = {}
         result.update(self._js("state", full, max_rows))
+        unsaved = d365web_model.unsaved_forms(self._js)  # a read: reported by both backends
+        if unsaved:
+            result["unsaved"] = unsaved
+        result.update(self.browser_mode())
         href = page.url()
         parts = urlsplit(href)
         query = parse_qs(parts.query)
@@ -1086,6 +730,8 @@ class WebClient:
             result["note"] = f"the client was still busy after {self.config.step_timeout:.0f} s; call web_wait"
         if self.js_dialogs:
             result["browser_dialogs_accepted"], self.js_dialogs = self.js_dialogs, []
+        if self.js_dialogs_dismissed:
+            result["browser_dialogs_dismissed"], self.js_dialogs_dismissed = self.js_dialogs_dismissed, []
         return result
 
     def _settle_and_state(self, **kwargs: Any) -> dict[str, Any]:
@@ -1105,8 +751,36 @@ class WebClient:
             state["dismissed"], self.dismissed = list(self.dismissed), []
         return state
 
-    def _locate(self, name: str, nth: int, kind: str) -> dict[str, Any]:
-        found = self._js("locate", name, nth, kind)
+    def _context(self) -> dict[str, Any]:
+        """The page context a press or row selection may move (see context_moves), with the address."""
+        found = self._js("context")
+        if not isinstance(found, dict):
+            return {"error": "unreadable"}
+        return dict(found, url=self._ensure().url())
+
+    def _report_moves(self, state: dict[str, Any], before: dict[str, Any]) -> None:
+        """`changed` lists what moved since `before`; `unchanged: true` when nothing did (with a note).
+        Not said while D365 is still busy, nor when a context could not be read."""
+        if state.get("idle") is False:
+            return
+        after = self._context()
+        moved = context_moves(before, after)
+        if moved is None:
+            return
+        if before.get("url") != after.get("url"):
+            moved.append("address")
+        if state.get("new_messages"):
+            moved.append("messages")
+        if state.get("browser_dialogs_accepted") or state.get("browser_dialogs_dismissed"):
+            moved.append("browser_dialog")
+        if moved:
+            state["changed"] = moved
+        else:
+            state["unchanged"] = True
+            state["note"] = UNCHANGED_NOTE
+
+    def _locate(self, name: str, nth: int, kind: str, explicit: bool = False) -> dict[str, Any]:
+        found = self._js("locate", name, nth, kind, explicit)
         if found.get("error"):
             details = {k: v for k, v in found.items() if k != "error" and v not in (None, [], 0)}
             if found.get("reason") == "tab_header_unavailable":
@@ -1117,10 +791,25 @@ class WebClient:
             raise D365WebError("not_found", f"no visible {'field' if kind == 'field' else 'control'} {name!r}"
                                f"{f' #{nth}' if nth else ''} in the current {found.get('scope', 'page')}{hint}", **details)
         if found.get("covered"):
-            found = self._uncover(name, nth, kind, found)
+            found = self._uncover(name, nth, kind, found, explicit)
         return found
 
-    def _uncover(self, name: str, nth: int, kind: str, found: dict[str, Any]) -> dict[str, Any]:
+    @staticmethod
+    def _refuse_upload(found: dict[str, Any], name: str, applied: list[dict[str, Any]] | None = None) -> None:
+        """A file upload control is not driven: its Browse opens the operating system's file picker, and which
+        files of the server machine may be sent to D365 is not d365web's decision."""
+        if found.get("upload"):
+            raise D365WebError("refused", f"{name!r} belongs to the file upload control {found['upload']!r}: d365web "
+                               "does not upload files (Browse opens the operating system's file picker); nothing "
+                               "was pressed. Cancel the dialog, or upload the file by hand", upload=found["upload"],
+                               **({"applied": list(applied)} if applied is not None else {}))
+
+    def _model_may_act(self, found: dict[str, Any]) -> bool:
+        """The model backend acts on this control: not on a grid row other than the active one, whose
+        viewmodel command D365 would apply to the active record (the input path clicks that row first)."""
+        return self.config.backend == "model" and not (found.get("in_row") and not found.get("active_row"))
+
+    def _uncover(self, name: str, nth: int, kind: str, found: dict[str, Any], explicit: bool = False) -> dict[str, Any]:
         """A click at the control's centre would land on something lying over it. D365's "What's new"
         teaching tips (qtip, e.g. "Save queries to these views" after a filter changed the view) are
         acknowledged with their own button, as a person would, and noted in the result (`dismissed`);
@@ -1133,7 +822,7 @@ class WebClient:
                 page.click(button["x"], button["y"])
                 self._wait_idle()
                 self.dismissed.append(f"{button.get('text', '')} ({button.get('label', '')})".strip())
-            found = self._js("locate", name, nth, kind)
+            found = self._js("locate", name, nth, kind, explicit)
             if found.get("error"):
                 raise D365WebError("not_found", f"{name!r} is gone after dismissing a tip", **found)
             if not found.get("covered"):
@@ -1144,77 +833,199 @@ class WebClient:
                            covered=cover)
 
     # --- operations (worker thread only) ----------------------------------------------------------
-    def _op_open(self, menu_item: str, company: str | None, kind: str | None) -> dict[str, Any]:
+    def _op_open(self, menu_item: str, company: str | None, kind: str | None, guard: bool = True) -> dict[str, Any]:
         page = self._ensure()
         mi = f"{kind}:{menu_item}" if kind and kind != "display" else menu_item
-        if not MENU_ITEM.match(mi):
+        if not MENU_ITEM.fullmatch(mi):
             raise D365WebError("refused", f"bad menu item {mi!r}")
         cmp = (company or self.config.company).lower()
         if cmp and not re.match(r"^[a-z0-9]{1,8}$", cmp):
             raise D365WebError("refused", f"bad company {cmp!r}")
         query = f"cmp={quote(cmp)}&mi={quote(mi)}" if cmp else f"mi={quote(mi)}"  # no cmp: the user's default
+        unsaved = d365web_model.unsaved_forms(self._js, strict=True) if guard else []
+        if unsaved is None:
+            raise D365WebError("refused", "cannot tell whether the page holds unsaved changes (D365 did not "
+                               "answer); nothing was opened: check with web_state, then try again")
+        if unsaved:
+            # Navigating away drops them without D365 asking (live: two sales lines lost, 2026-11-06).
+            raise D365WebError("refused", f"unsaved changes in {', '.join(unsaved)}: save them (web_press "
+                               "SystemDefinedSaveButton) or leave the form with web_press SystemDefinedCloseButton "
+                               "(D365 then saves valid changes and asks about the rest) before opening another page",
+                               unsaved=unsaved)
         page.navigate(f"{self.config.url}/?{query}")
         time.sleep(0.5)
         return self._after_step([])
 
     def _op_set(self, values: list[tuple[str, Any]]) -> dict[str, Any]:
+        """Set fields in order: each through the model where it can act, else by input; read back;
+        stop at a rejection or a dialog the field opened."""
         page = self._ensure()
         before = self._js("messages")
+        start = self._js("scope")
         applied: list[dict[str, Any]] = []
         for key, raw in values:
             name, nth = parse_field_key(key)
+            explicit = field_key_explicit(key)
             value = "" if raw is None else str(raw)
-            found = self._locate(name, nth, "field")
-            deadline = time.monotonic() + READONLY_GRACE
-            while found.get("readonly") and time.monotonic() < deadline:  # enabled by an earlier field?
-                time.sleep(0.25)
-                found = self._locate(name, nth, "field")
-            if found.get("readonly"):
-                raise D365WebError("refused", f"field {name!r} is read-only here", applied=list(applied))
-            if found.get("check"):
-                if as_bool(value) != (found.get("value") == "Yes"):
-                    page.click(found["x"], found["y"])
-                    self._wait_idle()
-                    again = self._js("locate", name, nth, "field")
-                    if not again.get("error") and (again.get("value") == "Yes") != as_bool(value):
-                        # the click was swallowed (a re-query, a popup): once more, through _locate's checks
-                        again = self._locate(name, nth, "field")
-                        if (again.get("value") == "Yes") != as_bool(value):
-                            page.click(again["x"], again["y"])
-            elif found.get("role") == "ComboBox":  # an enum: pick from its list, typing is ignored
-                if value.strip().lower() != str(found.get("value", "")).strip().lower():
-                    self._pick_combo(page, found, name, value, applied)
-            else:
-                page.click(found["x"], found["y"])
-                time.sleep(0.15)
-                page.key("Ctrl+a")
-                if value:
-                    page.type_text(value)
-                else:
-                    page.key("Delete")
-                page.key("Tab")
+            found = self._writable(name, nth, explicit, applied)
+            via, raw_value = self._model_set(found, name, value, applied)
+            if via == "input":
+                self._input_set(page, found, name, (nth, explicit), value, applied)
             self._wait_idle()
-            now = self._js("locate", name, nth, "field")
-            line = {"field": key, "value": value}
-            if not now.get("error"):
-                line["now"] = now.get("value", "")
-                if found.get("check"):
-                    if (line["now"] == "Yes") != as_bool(value):
-                        line["differs"] = True  # the checkbox did not take the value, even after a retry
-                elif value_differs(value, line["now"]):
-                    line["differs"] = True  # D365 changed or silently dropped the value
-            applied.append(line)
-            # D365 reports rejected values as warnings ("... is not found in the related table")
-            rejected = [m for m in self._js("messages") if m["severity"] in ("error", "warning") and m not in before]
-            if rejected:
+            applied.append(self._readback(key, name, (nth, explicit), found, value, via, raw_value))
+            if self._set_stops(before, start):
                 return self._after_step(before, applied=applied, stopped_at=key)
         return self._after_step(before, applied=applied)
+
+    def _writable(self, name: str, nth: int, explicit: bool, applied: list[dict[str, Any]]) -> dict[str, Any]:
+        """The field, once it is writable: an earlier field may enable it (READONLY_GRACE)."""
+        found = self._locate(name, nth, "field", explicit)
+        self._refuse_upload(found, name, applied)
+        if found.get("role") == "ReferenceGroup":
+            parts = found.get("parts") or []
+            raise D365WebError("refused", f"{name!r} is a reference group: set its field "
+                               f"{' or '.join(repr(p) for p in parts) or '(see web_state fields)'} instead; nothing was "
+                               "typed (a click on the group can open the referenced record)", parts=parts,
+                               applied=list(applied))
+        deadline = time.monotonic() + READONLY_GRACE
+        while found.get("readonly") and time.monotonic() < deadline:  # enabled by an earlier field?
+            time.sleep(0.25)
+            found = self._locate(name, nth, "field", explicit)
+        if found.get("readonly"):
+            hint = " (a grid line other than the current one: select that line first, web_select_row)" \
+                if found.get("in_row") and not found.get("active_row") else ""
+            raise D365WebError("refused", f"field {name!r} is read-only here{hint}", applied=list(applied))
+        return found
+
+    def _model_set(self, found: dict[str, Any], name: str, value: str,
+                   applied: list[dict[str, Any]]) -> tuple[str, bool]:
+        """(via, raw_value): "model" when the model acted (raw_value: compare D365's own value), else
+        "input" for the input path. A combo without the option is refused here, never typed."""
+        if not self._model_may_act(found):
+            return "input", False
+        if found.get("role") == "ComboBox" and value.strip().lower() == str(found.get("value", "")).strip().lower():
+            return "model", False  # nothing to send: a repeated SetSelectedItem would rerun D365's modified()
+        acted = d365web_model.set_value(self._js, found, value, as_bool(value) if found.get("check") else None)
+        if acted is None:
+            return "input", False
+        if acted.get("error") == "no_option":
+            raise D365WebError("refused", f"{name!r} has no option {value!r}",
+                               options=acted.get("options", []), applied=list(applied))
+        return "model", bool(acted.get("raw"))
+
+    def _input_set(self, page: Page, found: dict[str, Any], name: str, where: tuple[int, bool], value: str,
+                   applied: list[dict[str, Any]]) -> None:
+        """The input path: a checkbox is clicked (twice at most), a combo picked from its list, any other
+        field clicked, selected, typed and left with Tab."""
+        nth, explicit = where
+        if found.get("check"):
+            if as_bool(value) != (found.get("value") == "Yes"):
+                page.click(found["x"], found["y"])
+                self._wait_idle()
+                again = self._js("locate", name, nth, "field", explicit)
+                if not again.get("error") and (again.get("value") == "Yes") != as_bool(value):
+                    # the click was swallowed (a re-query, a popup): once more, through _locate's checks
+                    again = self._locate(name, nth, "field", explicit)
+                    if (again.get("value") == "Yes") != as_bool(value):
+                        page.click(again["x"], again["y"])
+            return
+        if found.get("role") == "ComboBox":  # an enum: pick from its list, typing is ignored
+            if value.strip().lower() != str(found.get("value", "")).strip().lower():
+                self._pick_combo(page, found, name, value, applied)
+            return
+        if found.get("role") != "MultilineInput" and any(c in value for c in "\r\n\t"):
+            # typed, a line break or tab is a key: Enter presses the default button, Tab moves on
+            raise D365WebError("refused", f"{name!r} is a one-line field: the value holds a line "
+                               "break or tab; nothing was typed", applied=list(applied))
+        page.click(found["x"], found["y"])
+        time.sleep(0.15)
+        self._require_focus(found, name, applied, where)
+        page.key("Ctrl+a")
+        if value:
+            page.type_text(value)
+        else:
+            page.key("Delete")
+        page.key("Tab")
+
+    def _readback(self, key: str, name: str, where: tuple[int, bool], found: dict[str, Any], value: str,
+                  via: str, raw_value: bool) -> dict[str, Any]:
+        """The `applied` line: what the field holds now, `differs` when it did not take the value,
+        a password confirmed through D365's own control state (never read back as text)."""
+        nth, explicit = where
+        now = self._js("locate", name, nth, "field", explicit)
+        at = now if "x" in now and "y" in now else found  # the written control, for D365's own value
+        hidden = secret(name) or secret(found.get("control", ""), found.get("password", False))
+        line = {"field": key, "value": MASK if hidden else value}
+        if self.config.backend == "model":
+            line["via"] = via  # which backend acted; input = the model could not act on this control
+        if hidden and via == "model":
+            # A password's input reads back empty; D365's own control knows whether it holds a value.
+            state = self._js("model:secretState", at["x"], at["y"], found.get("control", name))
+            if isinstance(state, dict) and "empty" in state:
+                if state["empty"] == bool(value):
+                    line["differs"] = True  # the secret did not take (or a clear did not)
+                else:
+                    line["confirmed"] = True
+        if now.get("error"):
+            return line
+        line["now"] = MASK if hidden else now.get("value", "")
+        # A password placeholder or empty readback cannot confirm the value.
+        if not hidden and found.get("check"):
+            if (line["now"] == "Yes") != as_bool(value):
+                line["differs"] = True  # the checkbox did not take the value, even after a retry
+        elif not hidden and value_differs(value, line["now"]):
+            # An ISO date set through the model shows in the user's format: compare D365's own value.
+            raw = self._js("model:rawValue", at["x"], at["y"], found.get("control", name)) if raw_value else None
+            if not (isinstance(raw, dict) and iso_matches(value, str(raw.get("value", "")))):
+                line["differs"] = True  # D365 changed or silently dropped the value
+        return line
+
+    def _set_stops(self, before: list[dict[str, Any]], start: Any) -> bool:
+        """Stop after this field: D365 rejected a value (as a warning: "... is not found in the related
+        table"), or the field opened a dialog (D365 asks before applying a customer group's dimensions),
+        which the caller answers before the remaining fields."""
+        if [m for m in self._js("messages") if m["severity"] in ("error", "warning") and m not in before]:
+            return True
+        scope = self._js("scope")
+        return isinstance(scope, dict) and isinstance(start, dict) and scope.get("scope") == "dialog" and \
+            (scope.get("scope"), scope.get("form")) != (start.get("scope"), start.get("form"))
+
+    def _require_focus(self, found: dict[str, Any], name: str, applied: list[dict[str, Any]],
+                       where: tuple[int, bool] = (0, False)) -> None:
+        """Keys go wherever the focus is: type only into the clicked field (a grid row change, a popup
+        that came up after the click can take it elsewhere)."""
+        if self._js("focusedAt", found["x"], found["y"]) is not False:  # True, or a page that cannot say
+            return
+        self._wait_idle()
+        # the click may have scrolled the grid or form: look at the field where it is now
+        again = self._js("locate", name, where[0], "field", where[1])
+        at = again if isinstance(again, dict) and "x" in again and "y" in again else found
+        if self._js("focusedAt", at["x"], at["y"]) is not False:
+            return
+        raise D365WebError("refused", f"{name!r} did not take the keyboard focus after the click; nothing was "
+                           "typed (check web_state for a dialog or the active line)", applied=list(applied))
+
+    def _wait_list(self, kind: str) -> bool:
+        """Let a click open its list before considering a keyboard toggle."""
+        for _ in range(4):
+            if self._js("listOpen", kind) is True:
+                return True
+            time.sleep(0.05)
+        return self._js("listOpen", kind) is True
+
+    def _dismiss_list(self, page: Page, kind: str) -> bool:
+        # Escape on a form can mean Back; only send it to an observed open list.
+        if self._js("listOpen", kind) is not True:
+            return False
+        page.key("Escape")
+        return True
 
     def _pick_combo(self, page: Page, found: dict[str, Any], name: str, value: str,
                     applied: list[dict[str, Any]]) -> None:
         page.click(found["x"], found["y"])
         time.sleep(0.15)
-        page.key("Alt+ArrowDown")
+        if not self._wait_list("combo"):
+            page.key("Alt+ArrowDown")
         option: dict[str, Any] = {}
         for _ in range(12):
             time.sleep(0.25)
@@ -1222,7 +1033,7 @@ class WebClient:
             if not option.get("error") or option.get("options"):
                 break
         if option.get("error"):
-            page.key("Escape")
+            self._dismiss_list(page, "combo")
             if option["error"] == "covered":  # scrolled to, but something else lies over it: click nothing
                 raise D365WebError("refused", f"{name!r}: option {value!r} is covered in its list",
                                    applied=list(applied))
@@ -1234,11 +1045,20 @@ class WebClient:
         page = self._ensure()
         before = self._js("messages")
         found = self._locate(name, nth, "any")
+        self._refuse_upload(found, name)
         if found.get("enabled") is False:
             raise D365WebError("refused", f"{name!r} is disabled")
-        page.click(found["x"], found["y"])
-        time.sleep(0.2)
-        return self._after_step(before, pressed=found.get("control", name))
+        extra: dict[str, Any] = {}
+        context = self._context()  # dispatch and idle are not proof that anything happened: compare after
+        acted = d365web_model.press(self._js, found) if self._model_may_act(found) else None
+        if acted is None:
+            page.click(found["x"], found["y"])
+            time.sleep(0.2)
+        if self.config.backend == "model":
+            extra["via"] = "model" if acted is not None else "input"
+        state = self._after_step(before, pressed=found.get("control", name), **extra)
+        self._report_moves(state, context)
+        return state
 
     def _op_key(self, keys: str) -> dict[str, Any]:
         page = self._ensure()
@@ -1248,34 +1068,108 @@ class WebClient:
             time.sleep(0.1)
         return self._after_step(before)
 
-    def _op_lookup(self, name: str, nth: int, pick: str | None) -> dict[str, Any]:
+    def _op_lookup(self, name: str, given: int | None, pick: str | None) -> dict[str, Any]:
         page = self._ensure()
         before = self._js("messages")
+        nth, explicit = given or 0, given is not None
+        model = self.config.backend == "model"
+        if model and self._js("scope")["scope"] != "lookup":
+            found = self._locate(name, nth, "field", explicit)
+            model = self._model_may_act(found)
+            if model and d365web_model.open_lookup(self._js, found):
+                self._wait_idle()
+        if model:
+            if self._js("scope")["scope"] == "lookup":
+                if pick is None:
+                    return self._after_step(before, via="model")
+                deadline = time.monotonic() + self.config.step_timeout
+                found = d365web_model.pick_lookup_row(self._js, pick, self._wait_idle, GRID_SCAN_CAP,
+                                                      lambda: time.monotonic() < deadline)
+                if found.get("ambiguous"):
+                    self._refuse_ambiguous_pick(page, pick, {"matches": found["ambiguous"]})
+                if found.get("picked"):
+                    self._wait_idle()  # the field shows the chosen row once D365 is done
+                    return self._after_step(before, picked=pick, via="model", **self._lookup_readback(name, nth, explicit, found))
+                shown = self._js("row", "", 0, {"*": pick}) if found.get("complete") else {}
+                if shown.get("error") == "ambiguous":
+                    self._refuse_ambiguous_pick(page, pick, shown)
+                if found.get("complete") and shown.get("error"):
+                    # Every row searched, by value and by shown text: refuse without typing into the field.
+                    rows = self._js("grid", "", 10)
+                    if d365web_model.cancel_lookup(self._js):
+                        self._wait_idle()
+                    raise D365WebError("not_found", f"no lookup row with a value {pick!r}", lookup=rows)
+            # Not opened, or the value may be a shown text only: the input path below (it types to filter).
         if self._js("scope")["scope"] != "lookup":
-            self._open_lookup(page, name, nth, None)
+            self._open_lookup(page, name, nth, None, explicit)
         if pick is None:
             return self._after_step(before)
         target = self._js("row", "", 0, {"*": pick})
+        if target.get("error") == "ambiguous":
+            self._refuse_ambiguous_pick(page, pick, target)
         if target.get("error"):
-            page.key("Escape")
+            self._dismiss_list(page, "lookup")
             self._wait_idle()
-            self._open_lookup(page, name, nth, pick)  # typed text filters the lookup
+            self._open_lookup(page, name, nth, pick, explicit)  # typed text filters the lookup
             target = self._js("row", "", 0, {"*": pick})
+            if target.get("error") == "ambiguous":
+                self._refuse_ambiguous_pick(page, pick, target, (name, nth, explicit))
             if target.get("error"):
                 rows = self._js("grid", "", 10)
-                page.key("Escape")
-                raise D365WebError("not_found", f"no lookup row with a value {pick!r}", lookup=rows)
+                self._dismiss_list(page, "lookup")
+                self._wait_idle()
+                # The text typed to filter the lookup stays in the field (D365 validates it): say what it holds.
+                now = self._js("locate", name, nth, "field", explicit)
+                shown = now.get("value") if isinstance(now, dict) and not now.get("error") else None
+                raise D365WebError("not_found", f"no lookup row with a value {pick!r}" + (
+                    f"; the field now holds {shown!r} (the filter text typed into it): check or set it" if shown else ""),
+                    lookup=rows, **({"now": shown} if shown is not None else {}))
         page.click(target["x"], target["y"])
-        return self._after_step(before, picked=pick)
+        self._wait_idle()
+        now = self._js("locate", name, nth, "field", explicit)  # what the field holds after the pick
+        shown = {"now": now.get("value", "")} if isinstance(now, dict) and not now.get("error") \
+            and not now.get("password") else {}
+        return self._after_step(before, picked=pick, **shown)
 
-    def _open_lookup(self, page: Page, name: str, nth: int, typed: str | None) -> None:
-        found = self._locate(name, nth, "field")
+    def _refuse_ambiguous_pick(self, page: Page, pick: str, target: dict[str, Any],
+                               field: tuple[str, int, bool] | None = None) -> None:
+        rows = self._js("grid", "", 10)
+        if not d365web_model.cancel_lookup(self._js):
+            self._dismiss_list(page, "lookup")
+        self._wait_idle()
+        now: dict[str, Any] = {}
+        if field is not None:  # the filter text was typed into the field: it stays there, D365 validates it
+            found = self._js("locate", *field[:2], "field", field[2])
+            if isinstance(found, dict) and not found.get("error") and not found.get("password"):
+                now = {"now": found.get("value", "")}
+        raise D365WebError("refused", f"{target.get('matches', 'several')} lookup rows hold {pick!r}; nothing was "
+                           "picked: give a value only one row holds (the key column)" +
+                           (f"; the field now holds {now['now']!r} (the filter text): check or set it" if now else ""),
+                           lookup=rows, matches=target.get("matches"), **now)
+
+    def _lookup_readback(self, name: str, nth: int, explicit: bool, picked: dict[str, Any]) -> dict[str, Any]:
+        """The field after a model pick: `now`, and `differs` when it holds none of the picked row's values."""
+        now = self._js("locate", name, nth, "field", explicit)
+        if not isinstance(now, dict) or now.get("error") or now.get("password"):
+            return {}
+        out: dict[str, Any] = {"now": now.get("value", "")}
+        values = [v for v in picked.get("values") or [] if v.strip()]
+        if values and all(value_differs(v, str(out["now"])) for v in values):
+            out["differs"] = True  # D365 shows something else than the chosen row: check the field
+        return out
+
+    def _open_lookup(self, page: Page, name: str, nth: int, typed: str | None, explicit: bool = False) -> None:
+        found = self._locate(name, nth, "field", explicit)
         page.click(found["x"], found["y"])
         time.sleep(0.15)
         if typed is not None:
+            # A click may already have opened it; return focus to the field before filtering.
+            if self._dismiss_list(page, "lookup"):
+                self._wait_idle()
             page.key("Ctrl+a")
             page.type_text(typed)
-        page.key("Alt+ArrowDown")
+        if not self._wait_list("lookup"):
+            page.key("Alt+ArrowDown")
         time.sleep(0.2)
         self._wait_idle()
         if self._js("scope")["scope"] != "lookup":
@@ -1314,6 +1208,9 @@ class WebClient:
                     line["messages"].append(f"(+{len(state['new_messages']) - len(shown)} more)")
             if state.get("pressed"):
                 line["pressed"] = state["pressed"]
+            for key in ("unchanged", "changed", "active_differs"):
+                if state.get(key):
+                    line[key] = state[key]
             if state.get("dismissed"):
                 line["dismissed"] = state["dismissed"]
             if [a for a in state.get("applied", []) if a.get("differs")]:
@@ -1353,18 +1250,29 @@ class WebClient:
         if op == "press":
             return self._op_press(args["name"], int(args.get("nth", 0)))
         if op == "lookup":
-            return self._op_lookup(args["field"], int(args.get("nth", 0)), args.get("pick"))
+            return self._op_lookup(args["field"], int(args["nth"]) if "nth" in args else None, args.get("pick"))
         if op == "filter":
             return self._op_filter(str(args.get("value", "")), args.get("column"))
         if op == "select_row":
             return self._op_select_row(args.get("grid", ""), int(args.get("row", 0)), args.get("match"))
         if op == "key":
             return self._op_key(args["keys"])
+        if op == "tree":
+            return self._op_tree(args.get("tree") or "", list(args["path"]))
         raise D365WebError("refused", f"unknown op {op!r}")
 
     def _op_filter(self, value: str, column: str | None) -> dict[str, Any]:
         page = self._ensure()
         before = self._js("messages")
+        if self.config.backend == "model":
+            sc = self._js("scope")
+            form = sc.get("form", "") if isinstance(sc, dict) and sc.get("scope") != "page" else ""
+            done = d365web_model.filter_grid(self._js, value, column, form)  # a column name or its label
+            if done and done.get("error") == "no_column":
+                raise D365WebError("not_found", f"the quick filter offers no column {column!r}", columns=done.get("columns", []))
+            if done:
+                info = {"cleared": True} if done.get("cleared") else {"column": done.get("column", column), "value": value}
+                return self._after_step(before, filter=info, via="model")
         box = self._js("quickfilter")
         if box.get("error"):
             raise D365WebError("not_found", "no quick filter in the current scope",
@@ -1385,7 +1293,7 @@ class WebClient:
             if not option.get("error") or option.get("columns"):
                 break
         if option.get("error"):
-            page.key("Escape")
+            self._dismiss_list(page, "filter")
             raise D365WebError("not_found", f"the quick filter offers no column {column!r}",
                                columns=option.get("columns", []))
         page.click(option["x"], option["y"])
@@ -1437,49 +1345,86 @@ class WebClient:
             self._wait_idle()
             first = self._js("grid", grid, 200)
         add(first)
-        complete, still = not top.get("scrollable"), 0
         columns = first.get("columns", [])
-        while not complete and len(rows) < GRID_SCAN_CAP and not (stop and stop(list(rows.values()), columns)):
-            moved = self._js("gridScroll", grid, "down")
+        stopped = lambda: bool(stop and stop(list(rows.values()), columns))  # noqa: E731
+        complete = not top.get("scrollable") or self._scroll_collect(grid, add, rows, stopped)
+        hint = first.get("rowcount_hint") or 0  # aria-rowcount, the header row included
+        moved = False
+        if complete and hint and len(rows) < hint - 1 and not stopped():
+            if self.config.backend == "model":
+                complete, hint = self._load_by_model(grid, first.get("name") or grid, add, rows, stopped, hint)
+            else:
+                complete, moved = self._load_by_keyboard(grid, add, rows, stopped, hint)
+        listed = [dict(row, row=i) for i, row in enumerate(rows.values())]
+        result = {"name": first.get("name"), "columns": first.get("columns", []), "rows": listed,
+                  "complete": complete, "truncated": len(rows) >= GRID_SCAN_CAP and not complete}
+        if moved:
+            result["selection_moved"] = True  # the input backend clicked the last row and paged down to load more
+        return result
+
+    def _scroll_collect(self, grid: str, add: Callable[[dict[str, Any]], int], rows: dict[str, Any],
+                        stopped: Callable[[], bool]) -> bool:
+        """Scroll down, collecting, until the bottom (no scroll and no new rows twice: D365 may still be
+        loading the next block), the cap or stop. True: the bottom was reached."""
+        still = 0
+        while len(rows) < GRID_SCAN_CAP and not stopped():
+            step = self._js("gridScroll", grid, "down")
             self._wait_idle()
             gained = add(self._js("grid", grid, 200))
-            if moved.get("after", 0) <= moved.get("before", 0) and not gained:
-                still += 1  # at the bottom; D365 may still be loading the next block, so look once more
+            if step.get("after", 0) <= step.get("before", 0) and not gained:
+                still += 1
                 if still >= 2:
-                    complete = True
+                    return True
             else:
                 still = 0
-        hint = first.get("rowcount_hint") or 0  # aria-rowcount, the header row included
-        if complete and hint and len(rows) < hint - 1 and not (stop and stop(list(rows.values()), columns)):
-            # Some grids keep one data block in the DOM, all of it in view, and fetch the next block only
-            # when the selection moves past its last row with the keyboard (a custom receiving log on
-            # the test box, 2026-10-26: 30 of 43 rows). Select the last rendered row, then page down like a person.
-            # This moves the grid's selection, which a scroll does not.
-            last = self._js("row", grid, max(0, len(self._js("grid", grid, 200).get("rows", [])) - 1), None)
-            if not last.get("error"):
-                page = self._ensure()
-                page.click(last["x"], last["y"])
-                rest = self._js("restPoint")
-                if not rest.get("error"):
-                    page.move(rest["x"], rest["y"])
-                self._wait_idle()
+        return False
+
+    def _load_by_model(self, grid: str, name: str, add: Callable[[dict[str, Any]], int], rows: dict[str, Any],
+                       stopped: Callable[[], bool], hint: int) -> tuple[bool, int]:
+        """Model backend: a read never sends input. Ask the grid's viewmodel for its remaining blocks
+        (LoadNextPage, only the scope's grid), then scroll again; no selection click, no PageDown."""
+        deadline = time.monotonic() + self.config.step_timeout
+        sc = self._js("scope")
+        form = sc.get("form", "") if isinstance(sc, dict) and sc.get("scope") != "page" else ""
+        pages = d365web_model.load_all_pages(self._js, name, self._wait_idle, GRID_SCAN_CAP,
+                                             lambda: time.monotonic() < deadline, form)
+        complete = True
+        if pages and pages.get("pages"):
+            self._js("gridScroll", grid, "top")
+            self._wait_idle()
+            complete = self._scroll_collect(grid, add, rows, stopped)
+            hint = self._js("grid", grid, 200).get("rowcount_hint") or hint
+        return complete and not (hint and len(rows) < hint - 1), hint
+
+    def _load_by_keyboard(self, grid: str, add: Callable[[dict[str, Any]], int], rows: dict[str, Any],
+                          stopped: Callable[[], bool], hint: int) -> tuple[bool, bool]:
+        """Input backend: some grids keep one data block in the DOM, all of it in view, and fetch the next
+        block only when the selection moves past its last row with the keyboard (a custom receiving log
+        on the test box, 2026-10-26: 30 of 43 rows). Select the last rendered row, then page down like a
+        person. This moves the grid's selection, which a scroll does not. (complete, selection moved)"""
+        last = self._js("row", grid, max(0, len(self._js("grid", grid, 200).get("rows", [])) - 1), None)
+        if last.get("error"):
+            return True, False
+        page = self._ensure()
+        page.click(last["x"], last["y"])
+        rest = self._js("restPoint")
+        if not rest.get("error"):
+            page.move(rest["x"], rest["y"])
+        self._wait_idle()
+        still = 0
+        while not stopped():  # also after the last block came
+            if len(rows) >= min(hint - 1, GRID_SCAN_CAP):
+                break
+            page.key("PageDown")
+            time.sleep(0.2)
+            self._wait_idle()
+            if add(self._js("grid", grid, 200)):
                 still = 0
-                while not (stop and stop(list(rows.values()), columns)):  # also after the last block came
-                    if len(rows) >= min(hint - 1, GRID_SCAN_CAP):
-                        break
-                    page.key("PageDown")
-                    time.sleep(0.2)
-                    self._wait_idle()
-                    if add(self._js("grid", grid, 200)):
-                        still = 0
-                    else:
-                        still += 1  # the next block may still be loading: look again before giving up
-                        if still >= 3:
-                            break
-                complete = len(rows) >= hint - 1
-        listed = [dict(row, row=i) for i, row in enumerate(rows.values())]
-        return {"name": first.get("name"), "columns": first.get("columns", []), "rows": listed,
-                "complete": complete, "truncated": len(rows) >= GRID_SCAN_CAP and not complete}
+            else:
+                still += 1  # the next block may still be loading: look again before giving up
+                if still >= 3:
+                    break
+        return len(rows) >= hint - 1, True
 
     def _op_select_row(self, grid: str, row: int, match: dict[str, Any] | None) -> dict[str, Any]:
         page = self._ensure()
@@ -1491,7 +1436,7 @@ class WebClient:
 
             def hit(rows: list[dict[str, Any]], columns: list[dict[str, Any]]) -> bool:  # rendered now
                 result = self._js("row", grid, 0, match)
-                if not result.get("error") or result.get("error") == "links_only":
+                if not result.get("error") or result.get("error") in ("links_only", "ambiguous"):
                     found.update(result)
                 return bool(found)
             scan = self._scan_grid(grid, stop=hit)
@@ -1500,6 +1445,9 @@ class WebClient:
                 target = found
             else:
                 target = dict(target, searched_rows=searched, truncated=scan["truncated"])
+        if target.get("error") == "ambiguous":
+            raise D365WebError("refused", f"{target.get('matches')} rows of grid {target.get('grid')!r} match; "
+                               "nothing was selected: narrow the match", **{k: v for k, v in target.items() if k != "error"})
         if target.get("error") == "links_only":
             raise D365WebError("refused", f"row {target['row']} of grid {target['grid']!r} has only hyperlink cells: "
                                "a click would open the record, not select the row; filter the list to it instead",
@@ -1508,6 +1456,7 @@ class WebClient:
             raise D365WebError("not_found", f"no {'matching ' if match else ''}row in grid {grid or '(largest)'!r}"
                                + (f" (searched {searched} rows, scrolling)" if searched is not None else ""),
                                **{k: v for k, v in target.items() if k != "error"})
+        context = self._context()
         page.click(target["x"], target["y"])
         # the pointer leaves the row for an inert spot of the form: resting on a linked record opens D365's
         # hover preview over the form (test box, 2026-10-26: the setup form's menu list); the page corner is
@@ -1515,7 +1464,81 @@ class WebClient:
         rest = self._js("restPoint")
         if not rest.get("error"):
             page.move(rest["x"], rest["y"])
-        return self._after_step(before, selected={"grid": target["grid"], "row": target["row"]})
+        state = self._after_step(before, selected={"grid": target["grid"], "row": target["row"]})
+        self._report_active(state, target)
+        self._report_moves(state, context)
+        if state.get("unchanged") and not state.get("active_differs") and state.get("active", {}).get("key"):
+            state["note"] = "the row was already the active record: nothing moved"
+        return state
+
+    def _report_active(self, state: dict[str, Any], target: dict[str, Any]) -> None:
+        """After a row click: the record D365 calls active (the one the detail fields and commands work
+        on), and `active_differs` when that is not the clicked row (the click was swallowed, a validation
+        kept the old row). Nothing is said when the grid has no viewmodel."""
+        active = self._js("active", target["grid"])
+        if not isinstance(active, dict) or active.get("error") or active.get("unknown"):
+            return
+        state["active"] = {k: active[k] for k in ("grid", "row", "key", "values") if k in active}
+        if state.get("caption"):
+            state["active"]["caption"] = state["caption"]
+        if target.get("key") and active.get("key") and str(target["key"]) != str(active["key"]):
+            state["active_differs"] = True
+
+    def _op_tree(self, tree: str, path: list[str]) -> dict[str, Any]:
+        """Select a tree node by its label path (root first): each parent is expanded (D365 loads its
+        children), then the last node selected, by clicks on the node's expand button and label. Labels are
+        matched exactly (case and outer spaces aside); a miss or two siblings with the label is refused
+        with the labels on offer. Tree checkboxes are never touched."""
+        page = self._ensure()
+        before = self._js("messages")
+        context = self._context()
+        parent: str | None = None
+        acted = False
+        for depth, label in enumerate(path):
+            node = self._tree_node(tree, parent, label, path[:depth])
+            tree = node["tree"]
+            last = depth == len(path) - 1
+            action = "select" if last else "expand"
+            if (last and node.get("selected")) or (not last and node.get("expanded") is not False):
+                parent = node["id"]
+                continue  # already selected, or expanded (or a leaf, which the next label then misses)
+            if action == "expand" and "bx" not in node:
+                raise D365WebError("refused", f"tree node {label!r} shows no expand button; nothing was clicked",
+                                   tree=tree, path=path[:depth + 1])
+            # Clicks, as a person: the tree's viewmodel commands take node objects the page does not hand
+            # out (its node data is plain, live 10.0.49), so the model has nothing safe to call here.
+            page.click(*((node["bx"], node["by"]) if action == "expand" else (node["x"], node["y"])))
+            acted = True
+            self._wait_idle()
+            parent = node["id"]
+        extra: dict[str, Any] = {"tree": {"name": tree, "selected": path}}
+        if self.config.backend == "model" and acted:
+            extra["via"] = "input"
+        state = self._after_step(before, **extra)
+        self._report_moves(state, context)
+        return state
+
+    def _tree_node(self, tree: str, parent: str | None, label: str, above: list[str]) -> dict[str, Any]:
+        """The node, once rendered: children appear a moment after their parent was expanded."""
+        deadline = time.monotonic() + READONLY_GRACE
+        while True:
+            node = self._js("treeNode", tree, parent, label)
+            if not isinstance(node, dict):
+                raise D365WebError("not_found", "the page did not answer for the tree")
+            if not node.get("error"):
+                return node
+            if node.get("error") == "ambiguous" or node.get("what") == "tree" or time.monotonic() >= deadline:
+                break
+            time.sleep(0.25)
+        where = " under " + " / ".join(above) if above else ""
+        details = {k: v for k, v in node.items() if k in ("tree", "trees", "options")}
+        if node.get("what") == "tree":
+            message = ("more than one tree here: name one (tree)" if node["error"] == "ambiguous"
+                       else f"no visible tree {tree!r} in the current {node.get('scope', 'page')}")
+            raise D365WebError("refused" if node["error"] == "ambiguous" else "not_found", message, **details)
+        if node["error"] == "ambiguous":
+            raise D365WebError("refused", f"more than one tree node {label!r}{where}; nothing was selected", **details)
+        raise D365WebError("not_found", f"no tree node {label!r}{where}", **details)
 
     def _op_grid(self, grid: str, max_rows: int, start_row: int = 0, all_rows: bool = False) -> dict[str, Any]:
         self._ensure()
@@ -1533,6 +1556,8 @@ class WebClient:
         if scan["truncated"]:
             out["truncated"] = True
             out["note"] = f"stopped at {GRID_SCAN_CAP} rows; filter the grid to narrow it"
+        if scan.get("selection_moved"):
+            out["selection_moved"] = True  # (input backend) the read selected the last row to load more
         return out
 
     def _op_click(self, x: float, y: float) -> dict[str, Any]:
@@ -1551,7 +1576,7 @@ class WebClient:
         page = self._ensure()
         folder = (self.state_dir or Path.cwd()) / "d365web-screens"
         folder.mkdir(parents=True, exist_ok=True)
-        path = folder / time.strftime("%Y%m%d-%H%M%S.png")
+        path = folder / (time.strftime("%Y%m%d-%H%M%S") + f"-{int(time.time() * 1000) % 1000:03d}.png")  # two in a second
         page.screenshot(path)
         return {"path": str(path), "bytes": path.stat().st_size}
 
@@ -1579,13 +1604,17 @@ class WebClient:
         check_operation("key", {"keys": keys})
         return self.call("web_key", lambda: self._op_key(keys))
 
-    def lookup(self, name: str, pick: str | None = None, nth: int = 0) -> dict[str, Any]:
-        check_operation("lookup", {"field": name, "pick": pick, "nth": nth})
+    def lookup(self, name: str, pick: str | None = None, nth: int | None = None) -> dict[str, Any]:
+        check_operation("lookup", {"field": name, "pick": pick, **({} if nth is None else {"nth": nth})})
         return self.call("web_lookup", lambda: self._op_lookup(name, nth, pick))
 
     def select_row(self, grid: str = "", row: int = 0, match: dict[str, Any] | None = None) -> dict[str, Any]:
         check_operation("select_row", {"grid": grid, "row": row, "match": match})
         return self.call("web_select_row", lambda: self._op_select_row(grid, row, match))
+
+    def tree(self, path: list[str], tree: str = "") -> dict[str, Any]:
+        check_operation("tree", {"path": path, "tree": tree})
+        return self.call("web_tree", lambda: self._op_tree(tree, list(path)))
 
     def run_scenario(self, steps: list[dict[str, Any]], variables: dict[str, Any] | None = None,
                      stop_on_mismatch: bool = True, full_final: bool = False) -> dict[str, Any]:

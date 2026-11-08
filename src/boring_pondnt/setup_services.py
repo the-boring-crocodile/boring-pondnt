@@ -27,8 +27,9 @@ behind the gateway now; `none` takes everything back out and retires the gateway
 
 The kit: the core serves `<state>/handbook`, not the release's
 `handbook/`. Setup copies the release's kit there once, when that folder does not
-exist, and never writes to it again: a later release only reports which files
-differ from its own kit, for the owner to merge deliberately. Uninstall keeps it.
+exist, and never writes to it again. Later releases report missing and changed
+pages for the owner to review. Ferry can serve a missing guide from the release.
+Uninstall keeps the person's handbook.
 An old install's `<state>/kit` (before the handbook) is not migrated: setup refuses
 and says how to reinstall (Wald, 2026-10-30).
 """
@@ -79,6 +80,8 @@ SERVICES = {
     "d365whsapp": Service("boring-d365whsapp", "d365whsapp", "boring_pondnt.d365whsapp_server", 18515, account="user"),
     # Opt-in: drives a signed-in Edge profile of the person (docs/D365WEB.md), so the person's account too.
     "d365web": Service("boring-d365web", "d365web", "boring_pondnt.d365web_server", 18516, account="user"),
+    # Opt-in: its own Entra app; the secret is DPAPI-protected for the person (docs/D365DATA.md).
+    "d365data": Service("boring-d365data", "d365data", "boring_pondnt.d365data_server", 18518, account="user"),
     # Only with --gateway: never in --only. SYSTEM at boot like the services; it calls them on loopback.
     "gateway": Service("boring-gateway", "gateway", "boring_mcp_ferry.server", 18517),
 }
@@ -86,10 +89,12 @@ GATEWAY = "gateway"
 NEVER_GATED = ("core", "knowledge", GATEWAY)  # the core and the notebook stay Copilot's own tools
 GATEWAY_NAME = "pondnt"                        # the ferry's name for its gateway
 FERRY = "ferry.json"
-GUIDES = {"d365": "d365.md", "d365whsapp": "warehouse.md"}  # kit pages service_describe returns
+GUIDES = {"d365": "d365.md", "d365whsapp": "warehouse.md", "d365data": "data.md"}  # kit pages service_describe returns
 DEFAULT_ONLY = "sourcecache,knowledge,canvas,core,d365"
 WHSAPP_CONFIG = "d365whsapp.json"
-OPT_IN_CONFIGS = {"d365whsapp": (WHSAPP_CONFIG, "docs/D365WHSAPP.md"), "d365web": ("d365web.json", "docs/D365WEB.md")}
+OPT_IN_CONFIGS = {"d365whsapp": (WHSAPP_CONFIG, "docs/D365WHSAPP.md"),
+                  "d365web": ("d365web.json", "docs/D365WEB.md"),
+                  "d365data": ("d365data.json", "docs/D365DATA.md")}
 CANVAS_WEB_PORT = 18510
 KIT = "handbook"
 
@@ -136,6 +141,8 @@ def gated_now(state: str) -> list[str]:
         data = json.loads((gateway_folder(state) / FERRY).read_text(encoding="utf-8"))
     except FileNotFoundError:
         return []
+    except ValueError:  # not JSON: say which file, not the decoder's position alone
+        raise ValueError("Invalid installed gateway configuration; inspect ferry.json before changing setup") from None
     backends = data.get("backends") if isinstance(data, dict) else None
     if not isinstance(backends, dict) or any(s not in SERVICES or s in NEVER_GATED for s in backends):
         raise ValueError("Invalid installed gateway configuration; inspect ferry.json before changing setup")
@@ -176,14 +183,24 @@ def write_private(path: Path, data: Any) -> None:
     disk.replace_atomically(path, (json.dumps(data, indent=2) + "\n").encode("utf-8"), create=not path.exists())
 
 
-def ferry_config(state: str, carried: list[str]) -> dict[str, Any]:
-    """The gateway's ferry.json: each gated service on loopback with its key, its kit page as guide."""
+GATEWAY_CALL_SECONDS = 900
+
+
+def ferry_config(root: str, state: str, carried: list[str]) -> dict[str, Any]:
+    """Each gated service uses its local guide when present, with a release fallback."""
     backends: dict[str, Any] = {}
     for short in carried:
-        backend: dict[str, Any] = {"upstream": {"url": SERVICES[short].url, "headers_file": f"{short}.headers.json"}}
-        guide = Path(kit_folder(state)) / GUIDES.get(short, "")
-        if short in GUIDES and guide.is_file():
-            backend["guide_file"] = str(guide)
+        # A read timeout for every backend call: without one a wedged backend holds the gateway's request
+        # for good. Above the longest tool (d365_run, 600 s), so it never cuts a working call.
+        backend: dict[str, Any] = {"upstream": {"url": SERVICES[short].url, "headers_file": f"{short}.headers.json",
+                                                "timeout_seconds": GATEWAY_CALL_SECONDS}}
+        if short in GUIDES:
+            page = GUIDES[short]
+            guide = Path(kit_folder(state)) / page
+            if not guide.is_file():
+                guide = Path(root) / KIT / page
+            if guide.is_file():
+                backend["guide_file"] = str(guide)
         backends[short] = backend
     return {"backends": backends, "gateways": {GATEWAY_NAME: {"service": "config.json", "backends": carried}}}
 
@@ -212,7 +229,8 @@ def kit_report(root: str, state: str) -> dict[str, Any]:
         report["state"] = "no-bootstrap"
         return report
     mine, theirs = kit_files(local), kit_files(release)
-    report["differs"] = sorted(n for n in set(mine) | set(theirs) if mine.get(n) != theirs.get(n))
+    report["differs"] = sorted(n for n in mine if mine[n] != theirs.get(n))
+    report["new_pages"] = sorted(theirs.keys() - mine.keys())
     report["state"] = "kept"
     return report
 
@@ -227,8 +245,14 @@ def seed_kit(root: str, state: str) -> None:
     if staging.exists():
         shutil.rmtree(staging)
     shutil.copytree(release, staging)
-    # A rename fails when the folder appeared meanwhile: then it is not ours to replace.
-    os.rename(staging, local)
+    # A rename fails when the folder appeared meanwhile: then it is not ours to replace,
+    # and the staging copy must not stay behind next to it.
+    try:
+        os.rename(staging, local)
+    except OSError:
+        shutil.rmtree(staging, ignore_errors=True)
+        if not local.exists():
+            raise
 
 
 def owned(service: Service, entry: Any) -> bool:
@@ -277,6 +301,7 @@ def plan(servers: dict[str, Any], root: str, state: str, index: str, only: list[
     carried: list[str] = []
     gateway = SERVICES[GATEWAY]
     gateway_entry = servers.get(gateway.name)
+    installed = owned(gateway, gateway_entry) or bool(gated_now(state))
     if gated and gateway_entry is not None and not owned(gateway, gateway_entry):
         # Refuse before publishing headers or removing a direct entry: this gateway is not ours.
         result["conflicts"].append(f"{gateway.name}: customized entry retained; gateway transition not configured")
@@ -302,7 +327,15 @@ def plan(servers: dict[str, Any], root: str, state: str, index: str, only: list[
         service = SERVICES[short]
         behind = short in gated
         if short == GATEWAY and not carried:
-            result["conflicts"].append(f"{service.name}: nothing to carry; not configured")
+            if installed:
+                # Like any other conflict, this leaves what is installed alone: retiring the gateway
+                # here would cut services it still carries, rewriting it would carry nothing.
+                result["conflicts"].append(
+                    f"{service.name}: none of the services chosen for it could be set up (see above); "
+                    "the installed gateway (entry, task, ferry.json) is left as it is, neither rewritten "
+                    "nor retired. Resolve those conflicts and run setup again, or -Gateway none to retire it")
+            else:
+                result["conflicts"].append(f"{service.name}: nothing to carry; not configured")
             continue
         if short == "sourcecache" and not index:
             result["conflicts"].append("boring-sourcecache: no source index; build it first")
@@ -349,7 +382,7 @@ def plan(servers: dict[str, Any], root: str, state: str, index: str, only: list[
             else:
                 item["entry"] = {"type": "http", "url": service.url, "headers": {"Authorization": f"Bearer {key}"}}
             if short == GATEWAY:
-                write_private(local / FERRY, ferry_config(state, carried))
+                write_private(local / FERRY, ferry_config(root, state, carried))
         result["services"].append(item)
     if carried:
         result["gateway"] = {"name": gateway.name, "carries": [SERVICES[s].name for s in carried]}
@@ -383,7 +416,13 @@ def finalize(servers: dict[str, Any], state: str, user: str, computer: str) -> d
                 continue
             key = held_key(entry)
         keyfile = Path(state) / "services" / service.short / "keys.json"
-        current = keys.KeyFile.load(keyfile)
+        try:
+            current = keys.KeyFile.load(keyfile)
+        except FileNotFoundError:
+            raise ValueError(f"{service.name}: published, but {keyfile} is missing; cleanup refused. "
+                             "Run setup again to issue a key") from None
+        except (OSError, ValueError) as error:
+            raise ValueError(f"{service.name}: {keyfile} unreadable ({error}); cleanup refused") from None
         held = [k for k in current.keys if key and k.sha256 == keys.fingerprint(key)
                 and k.subject == subject and k.label == LABEL and k.expires > time.time()]
         if len(held) != 1:
@@ -430,6 +469,12 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--finalize", action="store_true", help="retire obsolete keys after durable client publication")
     parser.add_argument("--uninstall", action="store_true", help="what -Uninstall removes; writes nothing")
     args = parser.parse_args(argv)
+    # The SYSTEM tasks run through cmd.exe, which expands %NAME% even inside quotes: a path with a
+    # "%" could start another program or log elsewhere. setup.ps1 refuses these first, too.
+    percent = [f"--{n} {v}" for n, v in (("root", args.root), ("state", args.state), ("index", args.index))
+               if "%" in v]
+    if percent:
+        parser.error(f"a path contains '%', which the tasks' cmd.exe lines would expand: {'; '.join(percent)}")
     only = [s.strip() for s in args.only.split(",") if s.strip()]
     unknown = [s for s in only if s not in SERVICES or s == GATEWAY]
     if unknown:
@@ -439,18 +484,19 @@ def main(argv: list[str] | None = None) -> None:
         parser.error("stdin must be the servers object of .mcp.json")
     if sum((args.plan, args.finalize, args.uninstall)) > 1:
         parser.error("plan, finalize and uninstall are mutually exclusive")
-    if args.finalize:
-        print(json.dumps(finalize(servers, args.state, getpass.getuser(), platform.node())))
-        return
-    if args.uninstall:
-        print(json.dumps(uninstall(servers, args.state, args.root, args.index)))
-        return
+    # Refusals (a corrupt ferry.json, a missing key file, a customized gateway) are ValueErrors:
+    # one line on stderr and exit 2, not a traceback; setup.ps1 stops on the exit code.
     try:
-        only, gated = choose_gated(args.gateway, only, args.state)
+        if args.finalize:
+            answer: Any = finalize(servers, args.state, getpass.getuser(), platform.node())
+        elif args.uninstall:
+            answer = uninstall(servers, args.state, args.root, args.index)
+        else:
+            only, gated = choose_gated(args.gateway, only, args.state)
+            answer = plan(servers, args.root, args.state, args.index, only, getpass.getuser(), platform.node(),
+                          apply=not args.plan, gated=gated)
     except ValueError as error:
         parser.error(str(error))
-    answer = plan(servers, args.root, args.state, args.index, only, getpass.getuser(), platform.node(),
-                  apply=not args.plan, gated=gated)
     print(json.dumps(answer))
 
 

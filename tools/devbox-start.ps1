@@ -54,7 +54,7 @@ function Read-DevboxRecord([string]$Path) {
     $seen = @{}
     foreach ($entry in @($data.entries)) {
         if (@($entry.PSObject.Properties.Name).Count -ne 6 -or
-            $entry.name -notin @('devbox','devbox-d365','devbox-d365whsapp','devbox-d365web','tunnel') -or
+            $entry.name -notin @('devbox','devbox-d365','devbox-d365whsapp','devbox-d365web','devbox-d365data','tunnel') -or
             $entry.state -notin @('starting','running','stopping','stopped') -or
             $entry.executable -isnot [string] -or -not $entry.executable -or
             $entry.commandline -isnot [string] -or -not $entry.commandline -or
@@ -167,6 +167,7 @@ function Start-DevboxTunnel([string]$CiRoot, [string]$RecordPath, $Record) {
              '-o','ConnectTimeout=15',
              '-R','127.0.0.1:18520:127.0.0.1:18520','-R','127.0.0.1:18522:127.0.0.1:18522',
              '-R','127.0.0.1:18524:127.0.0.1:18524','-R','127.0.0.1:18526:127.0.0.1:18526',
+             '-R','127.0.0.1:18528:127.0.0.1:18528',
              '-L',('127.0.0.1:18503:' + $ControlPlane))
     if ($MaintenanceSshPort) {
         if ($MaintenanceSshPort -lt 1024 -or $MaintenanceSshPort -gt 65535) { throw '-MaintenanceSshPort must be 1024-65535.' }
@@ -234,16 +235,17 @@ try {
         'Tunnel was not running; started again and recorded.'
         return
     }
-    # name -> Pond-facing port and module. devbox-d365whsapp and devbox-d365web start only when their
-    # configuration file (d365whsapp.json, d365web.json) exists next to their credentials.
-    $ports = [ordered]@{ 'devbox' = 18520; 'devbox-d365' = 18522; 'devbox-d365whsapp' = 18524; 'devbox-d365web' = 18526 }
+    # name -> Pond-facing port and module. Optional backends also need their own
+    # configuration file (d365whsapp.json, d365web.json, d365data.json) next to their credentials.
+    $ports = [ordered]@{ 'devbox' = 18520; 'devbox-d365' = 18522; 'devbox-d365whsapp' = 18524; 'devbox-d365web' = 18526; 'devbox-d365data' = 18528 }
     $modules = @{ 'devbox' = 'boring_pondnt.server'; 'devbox-d365' = 'boring_pondnt.d365_server'
-                  'devbox-d365whsapp' = 'boring_pondnt.d365whsapp_server'; 'devbox-d365web' = 'boring_pondnt.d365web_server' }
-    $configs = @{ 'devbox-d365whsapp' = 'd365whsapp'; 'devbox-d365web' = 'd365web' }
+                  'devbox-d365whsapp' = 'boring_pondnt.d365whsapp_server'; 'devbox-d365web' = 'boring_pondnt.d365web_server'
+                  'devbox-d365data' = 'boring_pondnt.d365data_server' }
+    $configs = @{ 'devbox-d365whsapp' = 'd365whsapp'; 'devbox-d365web' = 'd365web'; 'devbox-d365data' = 'd365data' }
     $names = @($ports.Keys)
     if ($Only) {
         $names = @($Only | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
-        if (@($names | Where-Object { $_ -notin @($ports.Keys) }).Count) { throw 'Unknown -Only service.' }
+        if (@($names | Where-Object { $_ -notin (@($ports.Keys) + @('tunnel')) }).Count) { throw 'Unknown -Only service.' }
     } else { $names += 'tunnel' }
     $selected = @($record.entries | Where-Object { $_.name -in $names })
     # Establish every selected ownership proof before stopping any process.

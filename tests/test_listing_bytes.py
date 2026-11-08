@@ -146,3 +146,63 @@ def test_read_only_targets_are_refused_before_any_effect(tmp_path):
         assert info.value.code == "forbidden" and "check it out" in info.value.message
     assert path.read_bytes() == b"\xef\xbb\xbf<a/>\r\n"
     path.chmod(0o644)
+
+
+def test_bytes_read_streams_the_hash_and_cuts_the_range_across_blocks(tmp_path, monkeypatch):
+    from boring_pondnt import disk
+    path = tmp_path / "blob.bin"
+    data = bytes(range(256)) * 40
+    path.write_bytes(data)
+    monkeypatch.setattr(disk, "READ_BLOCK", 1000)  # the range spans several blocks
+    reads = []
+    real_open = Path.open
+
+    def recording_open(self, *args, **kwargs):
+        handle = real_open(self, *args, **kwargs)
+        original = handle.read
+        handle.read = lambda size=-1: (reads.append(size), original(size))[1]
+        return handle
+
+    monkeypatch.setattr(Path, "open", recording_open)
+    part = binfiles.read_bytes(str(path), offset=2500, length=3000)
+    assert base64.b64decode(part["data"]) == data[2500:5500]
+    assert part["sha256"] == sha256_bytes(data) and part["size"] == len(data) and not part["eof"]
+    assert reads and max(reads) <= 1000  # never the whole file at once
+    tail = binfiles.read_bytes(str(path), offset=len(data) - 10, length=100)
+    assert base64.b64decode(tail["data"]) == data[-10:] and tail["eof"]
+    past = binfiles.read_bytes(str(path), offset=len(data) + 5, length=10)
+    assert past["length"] == 0 and past["eof"] and past["sha256"] == sha256_bytes(data)
+
+
+def test_bytes_read_refuses_a_file_that_grew_past_the_limit(tmp_path, monkeypatch):
+    path = tmp_path / "blob.bin"
+    path.write_bytes(b"x" * 10)
+    monkeypatch.setattr(binfiles, "FILE_MAX", 9)
+    with pytest.raises(Refused) as error:
+        binfiles.read_bytes(str(path))
+    assert error.value.code == "limit"
+
+
+def test_search_stops_at_its_time_budget_with_partial_results(tmp_path, monkeypatch):
+    root = tree(tmp_path)
+    result = listing.search(str(root), "@SYS12345", seconds=0)
+    assert result["stopped"] == "time" and result["truncated"] and result["matches"] == []
+    assert "partial" in result["note"]
+    # the budget runs out after the first file (deadline, root directory, readme.md, then past it)
+    clock = iter([0.0, 0.0, 0.0] + [100.0] * 50)
+    monkeypatch.setattr(listing.time, "monotonic", lambda: next(clock))
+    result = listing.search(str(root), "@SYS12345", seconds=10)
+    assert result["stopped"] == "time" and result["files_examined"] == 1
+    complete = listing.search(str(root), "@SYS12345")
+    assert complete["stopped"] is None and "note" not in complete
+
+
+def test_file_search_budget_leaves_room_behind_a_pond(monkeypatch):
+    from boring_pondnt.server import create_server
+    seen = []
+    monkeypatch.setattr(listing, "search", lambda *args: seen.append(args[-1]) or {"matches": []})
+    import asyncio
+    for budget, expected in ((None, listing.SEARCH_SECONDS), (25.0, 20.0)):
+        server = create_server(call_budget=budget)
+        asyncio.run(server.call_tool("file_search", {"path": ".", "query": "x"}))
+        assert seen[-1] == expected
