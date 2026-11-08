@@ -18,13 +18,13 @@ valid access key (`Authorization: Bearer bsk_...`). A key belongs to one
 server and one person, and lives 365 days; running setup with fewer than 30
 left renews it.
 
-Two loopback doors take no key, and any program on the box can use them:
+Two additional loopback surfaces sit outside the MCP bearer-key check:
 
 - **Canvas's web page** (port 18510) opens with a token in its URL, the
   link the Canvas tools hand out; whoever has the link sees and edits that
   canvas.
 - **The d365web browser's debugging port** (`debug_port` in `d365web.json`,
-  9333 in the examples) has no authentication at all. While that Edge runs,
+  9333 in the examples; form-mode d365whsapp normally uses 9334) has no authentication at all. While that Edge runs,
   any local program can drive the signed-in D365 session through it, as
   that user. Close the browser (`web_close`, or `idle_minutes`) when it is
   not needed.
@@ -45,15 +45,17 @@ Two loopback doors take no key, and any program on the box can use them:
   It is only narrower if that client gets no core key at all, of either
   role: the core's `exec` can do anything a reader key forbids, and the
   core's `file_read`, a reader tool, reads any file you can, `.mcp.json` and
-  its writer keys included. Every core key is a full key.
+  its writer keys included. Every core key is effectively a full key. Give core keys only to trusted
+  callers; there is no credential-free reader view of the core.
 
 ## What a writer can do
 
 | Server | Runs as | A writer can |
 |---|---|---|
-| core | you, elevated | run any command, read and write any file (absolute paths; no roots, no sandbox) |
+| core | you, elevated | run any command, read and write any file (absolute local paths; no roots, no sandbox; network shares, device paths, alternate data streams and device names refused) |
 | d365 | you, elevated | build, sync (module or full), best practice, `d365_run` (any d365fo.tools command, including stopping and restarting the environment), `d365_sql` (any statement on any local database, with your Windows login) |
 | d365web, d365whsapp | you, elevated | act in D365 as the signed-in user or warehouse worker |
+| d365data | you, elevated | read and change OData entities and run DMF packages with the permissions of the configured Entra app's mapped D365 user |
 | Sourcecache, Knowledge, Canvas, gateway | SYSTEM | search the index; write notes and drawings; reach the services behind the gateway with their keys |
 
 These are your rights, used by an agent. On a dev box they are what the
@@ -63,7 +65,7 @@ environment, they are a production change without review.
 ## What pondNT enforces
 
 - Loopback only; a key for every MCP call (the two doors above excepted);
-  reader/writer per call.
+  role checks per call, with the core credential-disclosure limit above.
 - No argument text in the call log ([FOUNDATION_SPEC](FOUNDATION_SPEC.md#call-log)).
 - The release folder: only administrators and SYSTEM may change it (and
   its owner, who can always change permissions; normally that is the
@@ -72,6 +74,12 @@ environment, they are a production change without review.
   ([INSTALL](INSTALL.md#1-download-check-and-unpack)).
 - Bounded calls: timeouts, row limits, result sizes; a lost reply is
   reported as unknown, never resent blindly.
+
+General services remain SYSTEM boot tasks. The release-folder lockdown
+protects their executable payload; it does not make their profile-based
+configuration immutable. Core and the D365 backends are interactive logon
+tasks. A gateway that starts at boot cannot make them available before the
+developer logs on.
 
 ## What it deliberately does not
 
@@ -103,6 +111,23 @@ environment, they are a production change without review.
   matters, nobody untrusted runs as you.
 - **Defender.** The optional exclusion stops scanning what pondNT's Python
   opens ([INSTALL, step 2](INSTALL.md#2-defender-optional----dangerous-read-first)).
+
+## Designs not implemented
+
+These are possible future boundaries, not settings or guarantees in this
+release:
+
+- a core reader view that cannot read credentials;
+- configurable core file roots or a constrained command identity;
+- dedicated least-privilege Windows service or database identities;
+- environment allowlists, target-identity checks and destructive-operation guards;
+- starting the core and D365 backends without the developer's logon.
+
+The standard installer keeps SYSTEM for general services. A dedicated D365
+browser test user is optional and signed in per profile
+([browser setup](D365WEB.md#setup)); it does not constrain core command access.
+SQL advice or a restricted tool alone cannot constrain a caller that also
+has arbitrary elevated execution.
 
 ## Before you install
 

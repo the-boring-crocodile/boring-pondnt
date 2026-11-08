@@ -235,7 +235,7 @@ def test_the_call_budget_caps_and_says_so(tmp_path):
             assert all(len(t["description"]) <= 120 for t in tools.values()), \
                 {n: len(t["description"]) for n, t in tools.items()}
             assert tools["exec"]["inputSchema"]["properties"]["timeout_seconds"]["default"] == 28
-            assert "crlf|lf" in tools["file_write"]["description"]
+            assert tools["file_write"]["inputSchema"]["properties"]["newline"]["enum"] == ["crlf", "lf", None]
     run(scenario())
 
 

@@ -230,7 +230,7 @@ def test_control_plane_is_explicit_and_canonical():
     assert tool.control_plane_target("[2001:db8::1]:443") == "[2001:db8::1]:443"
     line = tool.restricted_key("ssh-ed25519 AAAA", "192.0.2.1", "c", "198.51.100.7:18503")
     assert 'permitopen="198.51.100.7:18503"' in line
-    for port in (18520, 18522, 18524, 18526):  # devbox, -d365, -d365whsapp, -d365web (tools/devbox-start.ps1)
+    for port in (18520, 18522, 18524, 18526, 18528):  # core, D365, warehouse, browser, data
         assert f'permitlisten="127.0.0.1:{port}"' in line
     for bad in ("host.example:18503", "198.51.100.7", "198.51.100.7:0", "198.51.100.7:x"):
         with pytest.raises(ValueError):
@@ -242,7 +242,7 @@ def test_maintenance_port_is_optional_and_checked():
     assert "2222" not in plain
     line = tool.restricted_key("ssh-ed25519 AAAA", "192.0.2.1", "c", "198.51.100.7:18503", 2222)
     assert 'permitlisten="127.0.0.1:2222"' in line and line.startswith("restrict,port-forwarding,")
-    for bad in (22, 80, 18503, 18526, 70000, "2222", True):
+    for bad in (22, 80, 18503, 18526, 18528, 70000, "2222", True):
         with pytest.raises(ValueError):
             tool.restricted_key("ssh-ed25519 AAAA", "192.0.2.1", "c", "198.51.100.7:18503", bad)
 
@@ -336,7 +336,7 @@ def test_devbox_start_record_accepts_every_started_service():
     ports = re.search(r"\$ports = \[ordered\]@\{(.*?)\}", text).group(1)
     started = set(re.findall(r"'([a-z0-9-]+)'\s*=\s*\d+", ports))
     accepted = set(re.findall(r"'([a-z0-9-]+)'", re.search(r"\$entry\.name -notin @\((.*?)\)", text).group(1)))
-    assert started == {"devbox", "devbox-d365", "devbox-d365whsapp", "devbox-d365web"}
+    assert started == {"devbox", "devbox-d365", "devbox-d365whsapp", "devbox-d365web", "devbox-d365data"}
     assert started | {"tunnel"} == accepted
     for port in re.findall(r"=\s*(\d+)", ports):
         assert f"'127.0.0.1:{port}:127.0.0.1:{port}'" in text  # each port is forwarded

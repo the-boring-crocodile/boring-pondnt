@@ -19,11 +19,13 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any
+from pydantic import Field
 
 from mcp.server.mcpserver import MCPServer
 
@@ -49,8 +51,13 @@ INSTRUCTIONS = (
     "has one server session; steps change real data in the connected D365."
 )  # + the mode's own sentence (create_server)
 SCENARIO_STEPS_MAX = 50
-REFUSAL_CODES = {"refused", "no_session", "no_company", "busy", "no_run", "not_found", "covered"}
+REFUSAL_CODES = {"refused", "no_session", "no_company", "busy", "no_run", "not_found", "covered", "retry_later",
+                 "no_lookup"}  # no_lookup: a refusal in d365web too
 BUDGET_MARGIN = 5.0  # covers the recovery login (well under a second when warm)
+
+
+# Each server its own name: support bundles collect several state folders flat.
+CALL_LOG = "calls-d365whsapp.jsonl"
 
 
 def _outcome(error: WhsError) -> Outcome:
@@ -58,6 +65,11 @@ def _outcome(error: WhsError) -> Outcome:
     details.update(getattr(error, "details", None) or {})  # form mode: d365web's details (its page)
     cls = Refused if error.code in REFUSAL_CODES else Failed
     return cls(error.code, error.message, **details)
+
+
+def worker_key(worker: str) -> str:
+    """One spelling of a worker everywhere ('w1 ' and 'W1' are the same worker, as in the backends)."""
+    return worker.strip().upper()
 
 
 class ScenarioRuns:
@@ -83,10 +95,15 @@ class ScenarioRuns:
     def acting(self, worker: str) -> Iterator[None]:
         """Reserve the worker for one acting call (login, submit, logoff): refused while a
         scenario run is open; a scenario cannot start until the call is done."""
-        key = worker.upper()
+        key = worker_key(worker)
         with self.runs.lock:
             if self.runs.peek(key) is not None:
                 raise self._open(key)
+            if self.active.get(key):
+                # a second step would act on a page its caller never saw (a retry of a lost reply, two
+                # clients): refuse; whs_screen shows the page the first one leaves
+                raise Refused("busy", f"worker {key} has a step in progress; call whs_screen once it is done "
+                              "and decide on that page")
             self.active[key] = self.active.get(key, 0) + 1
         try:
             yield
@@ -97,7 +114,7 @@ class ScenarioRuns:
                     del self.active[key]
 
     def start(self, worker: str, run: Any) -> dict[str, Any]:
-        key = worker.upper()
+        key = worker_key(worker)
         transcript: list[dict[str, Any]] = []
 
         def admit() -> None:
@@ -109,7 +126,7 @@ class ScenarioRuns:
         return self._answer(key, entry, self.budget)
 
     def wait(self, worker: str, seconds: float | None) -> dict[str, Any]:
-        key = worker.upper()
+        key = worker_key(worker)
         entry = self.runs.get(key)
         if entry is None:
             raise Refused("no_run", f"worker {key} has no scenario run to collect")
@@ -152,13 +169,27 @@ def create_server(backend: AppBackend | FormBackend | WhsClient, state_dir: Path
                     version=__version__, token_verifier=token_verifier, auth=auth,
                     auth_server_provider=auth_server_provider)
     attach_heartbeat(mcp, on_discover)
-    log = CallLog(state / "calls-d365whsapp.jsonl" if log_calls else None)
+    log = CallLog(state / CALL_LOG if log_calls else None)
     runs = ScenarioRuns(call_budget - BUDGET_MARGIN if call_budget else None)
     steps_log = StepLog(state / "whs-steps")
+    logoff_items = backend.client.logoff_items if isinstance(backend, AppBackend) else backend.logoff_items
+    log_problems: dict[str, str] = {}
+    log_problems_lock = threading.Lock()
+
+    def lookup_note(worker: str, message: str) -> None:
+        # A background write has no tool result; report its first failure with the next action.
+        with log_problems_lock:
+            problem = steps_log.record(worker, "logoff discovery", lines=[message])
+            if problem:
+                log_problems.setdefault(worker_key(worker), problem)
+
+    logoff_items.observe(lookup_note)
     mode = backend.mode
 
     def note(result: dict[str, Any], worker: str, action: str, shown: Any = None, **extra: Any) -> dict[str, Any]:
-        problem = steps_log.record(worker, action, lines=shown.lines if shown is not None else None, **extra)
+        with log_problems_lock:
+            problem = steps_log.record(worker, action, lines=shown.lines if shown is not None else None, **extra)
+            problem = log_problems.pop(worker_key(worker), None) or problem
         if problem:
             result["log_error"] = problem
         return result
@@ -171,6 +202,9 @@ def create_server(backend: AppBackend | FormBackend | WhsClient, state_dir: Path
             steps_log.record(worker, action, error=f"{error.code}: {error.message}",
                              lines=backend.error_lines(error))
             raise
+        finally:
+            for message in backend.logoff_notes(worker):
+                steps_log.record(worker, "logoff discovery", lines=[message])
 
     def tool(annotations: Any, role: str) -> Any:
         def register(fn: Any) -> Any:
@@ -187,9 +221,12 @@ def create_server(backend: AppBackend | FormBackend | WhsClient, state_dir: Path
         return register
 
     @tool(RUNS, "writer")
-    def whs_login(worker: str, password: str, company: str | None = None) -> dict[str, Any]:
-        """Log a test worker in (company: this argument, else the config's; there is no built-in one). If the worker already has a server
-        session, it resumes at its last page (resumed=true). A failed login is never retried."""
+    def whs_login(
+        worker: Annotated[str, Field(description="Warehouse worker ID, not the Windows or Entra account.")],
+        password: Annotated[str, Field(description="Warehouse worker password. Keep it out of notes and logs.")],
+        company: Annotated[str | None, Field(description="Legal entity. Omit to use the configured company.")] = None,
+    ) -> dict[str, Any]:
+        """Log in a test worker or resume its current page. Check whs_screen before retrying an unfinished form step."""
         action = "login" + (f" company {company}" if company else "") + " (password not logged)"
         with runs.acting(worker):
             shown, resumed = act(worker, action, lambda: backend.login(worker, password, company))
@@ -197,16 +234,24 @@ def create_server(backend: AppBackend | FormBackend | WhsClient, state_dir: Path
                     action + (" (resumed)" if resumed else ""), shown)
 
     @tool(READ_ONLY, "reader")
-    def whs_screen(worker: str) -> dict[str, Any]:
-        """The worker's current page; form mode first collects that worker's outstanding step result or error."""
+    def whs_screen(
+        worker: Annotated[str, Field(description="Test warehouse worker ID used with whs_login.")],
+    ) -> dict[str, Any]:
+        """Read a worker's current page. In form mode, also collect the result of its pending form step."""
         shown = act(worker, "screen", lambda: backend.screen(worker))
         return {"worker": worker.upper(), **shown.summary}
 
     @tool(RUNS, "writer")
-    def whs_submit(worker: str, values: TextMap = None, press: str | None = None) -> dict[str, Any]:
-        """Fill enabled fields (name -> text) and press a button (name); returns the next page.
-        recovered=true: the reply was lost and the session was resumed by a new login; check the
-        page (the step may or may not have run). Values for read-only fields are refused."""
+    def whs_submit(
+        worker: Annotated[str, Field(description="Test warehouse worker ID used with whs_login.")],
+        values: Annotated[TextMap, Field(
+            description="Map of enabled field names from whs_screen to text values.",
+        )] = None,
+        press: Annotated[str | None, Field(
+            description="Enabled button name from whs_screen. Omit to set fields only.",
+        )] = None,
+    ) -> dict[str, Any]:
+        """Fill fields and press a button. Use whs_screen for a pending form step. If recovered, verify before retrying."""
         action = _step_action(backend, worker, values, press)
         with runs.acting(worker):
             shown, recovered = act(worker, action, lambda: backend.submit(worker, values, press))
@@ -216,24 +261,34 @@ def create_server(backend: AppBackend | FormBackend | WhsClient, state_dir: Path
         return note(result, worker, action, shown, recovered=recovered)
 
     @tool(RUNS, "writer")
-    def whs_logoff(worker: str) -> dict[str, Any]:
-        """Cancel/Back/Leave to the main menu and log off; ends the worker's session."""
+    def whs_logoff(
+        worker: Annotated[str, Field(description="Test warehouse worker ID used with whs_login.")],
+    ) -> dict[str, Any]:
+        """Leave the worker's pages and end its warehouse session. retry_later: the logoff names are still
+        being looked up (right after a D365 start); nothing was pressed, the session is kept; call again in a few seconds."""
         with runs.acting(worker):
             shown = act(worker, "logoff", lambda: backend.logoff(worker))
         logged_off = shown is None or shown.view.page == "Login"
         return note({"worker": worker.upper(), "logged_off": logged_off}, worker, "logoff", shown)
 
     @tool(RUNS, "writer")
-    def whs_run_scenario(worker: str, steps: list[dict[str, Any]], stop_on_mismatch: bool = True,
-                         variables: AnyMap = None) -> dict[str, Any]:
-        """Run steps on a logged-in worker. Step: {"values": {...}, "press": "...", "expect":
-        {"page", "step", "title", "message_kind", "message" (substring), "fields": {name: data},
-        "labels": {name: substring of the label}}, "note": "..."}.
-        ${name} in values, press and expect is replaced from variables (e.g. a PO number that
-        d365web's web_run_scenario saved). Returns one line per step and the final page; ok=false
-        at the first mismatch or error. Mode form lists what it cannot check in not_checked. A run
-        that outlasts the call answers status=running with steps_done; whs_wait collects the result
-        (the worker is busy until then)."""
+    def whs_run_scenario(
+        worker: Annotated[str, Field(description="Test warehouse worker ID used with whs_login.")],
+        steps: Annotated[list[dict[str, Any]], Field(
+            description=(
+                "Objects with optional values, press, note and expect. expect supports page, step, "
+                "title, message_kind, message substring, fields by name and label substrings by "
+                "name."
+            ),
+            json_schema_extra={"minItems": 1, "maxItems": SCENARIO_STEPS_MAX},
+        )],
+        stop_on_mismatch: Annotated[bool, Field(description="Stop on the first failed expectation.")] = True,
+        variables: Annotated[AnyMap, Field(
+            description="Values for ${name} in steps, such as an order number saved by web_run_scenario.",
+        )] = None,
+    ) -> dict[str, Any]:
+        ("Run steps on a logged-in worker. Poll whs_wait if running. Form mode lists uncheckable expectations "
+         "separately.")
         steps = substitute(steps, {k: str(v) for k, v in (variables or {}).items()},
                            lambda message: Refused("refused", message))
         try:
@@ -291,10 +346,14 @@ def create_server(backend: AppBackend | FormBackend | WhsClient, state_dir: Path
         return result
 
     @tool(READ_ONLY, "reader")
-    def whs_log(worker: str, lines: int = 60) -> dict[str, Any]:
-        """The worker's readable step log, newest last: each login, submit, logoff and scenario step
-        with the values set, the button pressed and the page D365 answered (passwords never logged).
-        lines: 1-500 (at most 64 KiB)."""
+    def whs_log(
+        worker: Annotated[str, Field(description="Test warehouse worker ID used with whs_login.")],
+        lines: Annotated[int, Field(
+            description="Number of tail lines.",
+            json_schema_extra={"minimum": 1, "maximum": 500},
+        )] = 60,
+    ) -> dict[str, Any]:
+        """Read the worker's step and page log, newest last, up to 64 KiB. Passwords are masked."""
         if not 1 <= lines <= 500:
             raise Refused("refused", "lines must be 1-500")
         text = steps_log.tail(worker, lines)
@@ -303,9 +362,16 @@ def create_server(backend: AppBackend | FormBackend | WhsClient, state_dir: Path
         return {"worker": worker.upper(), "log": text, "file": str(steps_log.path(worker))}
 
     @tool(RUNS, "writer")
-    def whs_wait(worker: str, seconds: float | None = None) -> dict[str, Any]:
-        """The result of a whs_run_scenario that answered status=running (again running, with
-        steps_done, if it still is). seconds caps the wait (default: the call budget)."""
+    def whs_wait(
+        worker: Annotated[str, Field(description="Test warehouse worker ID used with whs_login.")],
+        seconds: Annotated[float | None, Field(
+            description=(
+                "Seconds to wait. Omit for the service's call budget. A lower service cap takes "
+                "priority."
+            ),
+        )] = None,
+    ) -> dict[str, Any]:
+        """Collect a pending whs_run_scenario result. If still running, wait again before acting on the worker."""
         return runs.wait(worker, seconds)
 
     refuse_unknown_arguments(mcp)

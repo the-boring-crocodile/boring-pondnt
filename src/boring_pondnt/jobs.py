@@ -31,9 +31,12 @@ from .job_lifecycle import ProcessJobs
 
 TIMEOUT_MAX = 86_400.0
 WAIT_MAX = 60.0
+OUTPUT_STREAMS = ("stdout", "stderr")
 OUTPUT_LINES_DEFAULT = 100
 OUTPUT_LINES_MAX = 2000
 OUTPUT_MAX_CHARS = 32 * 1024
+OUTPUT_CHECK_SECONDS = 5.0
+OUTPUT_FILE_MAX = 1024 ** 3  # bytes per stream on disk: a runaway job must not fill the system drive
 LIST_MAX = 100
 
 
@@ -46,7 +49,7 @@ def check_wait(job_ids: list[str], wait_seconds: float) -> None:
 
 def check_output(stream: str, tail_lines: int | None, start_line: int | None,
                  line_count: int) -> int:
-    if stream not in ("stdout", "stderr"):
+    if stream not in OUTPUT_STREAMS:
         raise Refused("invalid_request", "stream must be stdout or stderr")
     if tail_lines is not None and start_line is not None:
         raise Refused("invalid_request", "give tail_lines or start_line, not both")
@@ -84,6 +87,7 @@ class Job:
     stop_requested: threading.Event = field(default_factory=threading.Event)
     cleanup_error: str | None = None
     error: str | None = None
+    output_capped: bool = False
 
     def status(self) -> dict[str, Any]:
         end = self.ended if self.ended is not None else time.time()
@@ -99,6 +103,9 @@ class Job:
         }
         if self.error is not None:
             result["error"] = self.error
+        if self.output_capped:
+            result["output_capped"] = True
+            result["error"] = f"stopped: its output passed {OUTPUT_FILE_MAX // 1024 ** 2} MiB on disk"
         if self.cleanup_error is not None:
             result["cleanup_confirmed"] = False
             result["error"] = self.cleanup_error
@@ -120,6 +127,8 @@ class Jobs(ProcessJobs[Job]):
 
     def start(self, command: str, shell: str | None = None, cwd: str | None = None,
               timeout_seconds: float = 3600.0) -> dict[str, Any]:
+        for directory in self._forget_old():  # outside the admission lock: a folder can hold gigabytes
+            shutil.rmtree(directory, ignore_errors=True)
         with self._lock:
             if self._closed:
                 raise Failed("unavailable", "the job manager is closed")
@@ -146,7 +155,23 @@ class Jobs(ProcessJobs[Job]):
             shutil.rmtree(directory, ignore_errors=True)
             raise Failed("start_failed", str(exc)) from None
         self._publish(job)
+        threading.Thread(target=self._guard_output, args=(job,), name=f"job-output-{job_id[:8]}", daemon=True).start()
         return job.status()
+
+    def _guard_output(self, job: Job) -> None:
+        """Stop a job whose output on disk passes OUTPUT_FILE_MAX."""
+        while not job.done.wait(OUTPUT_CHECK_SECONDS):
+            try:
+                big = max((job.directory / s).stat().st_size for s in ("stdout", "stderr"))
+            except OSError:
+                continue
+            if big > OUTPUT_FILE_MAX:
+                job.output_capped = True
+                try:
+                    self._stop(job.job_id)
+                except Exception:  # noqa: BLE001 -- the job may have ended meanwhile
+                    pass
+                return
 
     def stop(self, job_id: str) -> dict[str, Any]:
         return self._stop(job_id).status()
@@ -190,6 +215,15 @@ class Jobs(ProcessJobs[Job]):
         return {"jobs": [job.status() for job in jobs[:limit]], "total": len(jobs)}
 
     # --- housekeeping ------------------------------------------------------
+
+    def _forget_old(self) -> list[Path]:
+        """A long-running server: ended jobs past retention leave memory; their folders are returned to delete."""
+        cutoff = time.time() - RETENTION_SECONDS
+        with self._lock:
+            old = [j for j in self._jobs.values() if j.done.is_set() and (j.ended or j.started) < cutoff]
+            for job in old:
+                self._jobs.pop(job.job_id, None)
+        return [job.directory for job in old]
 
     def _sweep(self) -> None:
         cutoff = time.time() - RETENTION_SECONDS

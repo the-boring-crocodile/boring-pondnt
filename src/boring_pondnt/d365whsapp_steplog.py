@@ -14,6 +14,7 @@ reports it once as `log_error`.
 """
 from __future__ import annotations
 
+import hashlib
 import re
 import threading
 import time
@@ -27,12 +28,16 @@ from .d365whsapp_protocol import MESSAGE_CONTROL, Page
 MAX_BYTES = 1024 * 1024
 TAIL_BYTES = 64 * 1024
 MASK = "***"
-_SECRET_NAME = re.compile(r"password|passwd|secret|pin\b", re.IGNORECASE)
+SECRET_NAME_PATTERN = r"password|passwd|secret|pin\b|pincode|pin_"
+_SECRET_NAME = re.compile(SECRET_NAME_PATTERN, re.IGNORECASE)
 _UNSAFE = re.compile(r"[^A-Z0-9_.-]")
 
 
 def _file_name(worker: str) -> str:
-    name = _UNSAFE.sub("_", worker.upper()) or "_"
+    key = worker.strip().upper()
+    name = _UNSAFE.sub("_", key) or "_"
+    if name != key:  # 'A B' and 'A_B' are two workers: two files
+        name += "-" + hashlib.sha256(key.encode()).hexdigest()[:8]
     return f"steps-{name}.log"
 
 
@@ -136,7 +141,7 @@ class StepLog:
         """Append one entry; returns a log_error text the first time a write fails, else None.
         `lines`: the page already described (form mode: d365web_whsform.describe_page)."""
         stamp = time.strftime("%Y-%m-%d %H:%M:%S")
-        entry = [f"{stamp}  {worker.upper()}  {action}"]
+        entry = [f"{stamp}  {worker.strip().upper()}  {' '.join(action.splitlines())}"]  # one line: no forged entries
         if error:
             entry.append(f"  -> error {error}")
         if page is not None:

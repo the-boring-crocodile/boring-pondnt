@@ -93,3 +93,18 @@ def test_refusals(jobs):
         with pytest.raises(Refused) as info:
             call()
         assert info.value.code == "invalid_request"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX commands; Windows covered by test_execs")
+def test_a_job_whose_output_passes_the_cap_is_stopped(tmp_path, monkeypatch):
+    from boring_pondnt import jobs as jobs_module
+    monkeypatch.setattr(jobs_module, "OUTPUT_FILE_MAX", 10_000)
+    monkeypatch.setattr(jobs_module, "OUTPUT_CHECK_SECONDS", 0.1)
+    manager = jobs_module.Jobs(tmp_path)
+    try:
+        started = manager.start("yes x", timeout_seconds=30)
+        result = manager.wait([started["job_id"]], 10)
+        status = result["jobs"][0]
+        assert result["all_ended"] and "output passed" in (status.get("error") or "")
+    finally:
+        manager.shutdown()

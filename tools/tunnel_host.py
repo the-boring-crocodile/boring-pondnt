@@ -244,7 +244,7 @@ def maintenance_listen(port):
     """Optional loopback port on this host forwarded back to the box's sshd (devbox-start -MaintenanceSshPort)."""
     if port is None:
         return ""
-    if type(port) is not int or not 1024 <= port <= 65535 or port in (18503, 18520, 18522, 18524, 18526):
+    if type(port) is not int or not 1024 <= port <= 65535 or port in (18503, 18520, 18522, 18524, 18526, 18528):
         raise ValueError("maintenance port must be a free unprivileged port")
     return 'permitlisten="127.0.0.1:' + str(port) + '",'
 
@@ -253,7 +253,7 @@ def restricted_key(key, box, comment, control_plane, maintenance_port=None):
     ipaddress.ip_address(box)
     target = control_plane_target(control_plane)
     return ('restrict,port-forwarding,from="' + box +
-            '",permitlisten="127.0.0.1:18520",permitlisten="127.0.0.1:18522",permitlisten="127.0.0.1:18524",permitlisten="127.0.0.1:18526",' +
+            '",permitlisten="127.0.0.1:18520",permitlisten="127.0.0.1:18522",permitlisten="127.0.0.1:18524",permitlisten="127.0.0.1:18526",permitlisten="127.0.0.1:18528",' +
             maintenance_listen(maintenance_port) +
             'permitopen="' + target + '" ' + key + " " + comment + "\n")
 

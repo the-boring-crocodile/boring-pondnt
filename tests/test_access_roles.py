@@ -187,9 +187,12 @@ def test_d365_reader_is_refused_admin_build_sql_and_jobs(tmp_path, index):  # no
                 assert forbidden(await service.result(tool, arguments)), tool
             assert service.record == []  # no PowerShell script, SQL connection or job was started
             for tool, arguments in (("xref", {"what": "info"}),
-                                    ("xref", {"what": "names", "name": "ContosoBase"})):
+                                    ("xref", {"what": "names", "name": "ContosoBase"}),
+                                    ("d365_job", {})):
                 is_error, data = await service.result(tool, arguments)
                 assert not is_error, (tool, data)
+            is_error, data = await service.result("d365_job", {"job_id": "0123456789ab"})
+            assert not forbidden((is_error, data)) and data.get("code") == "not_found", data
     run(scenario())
 
 
@@ -198,8 +201,9 @@ def test_d365_reader_is_refused_admin_build_sql_and_jobs(tmp_path, index):  # no
 CORE_WRITER = {"file_write", "file_patch", "file_write_bytes", "exec", "job_start", "job_stop"}
 CORE_READER = {"bootstrap", "file_read", "file_read_bytes", "file_list", "file_search",
                "job_list", "job_wait", "job_output", "batch"}
-D365_WRITER = {"d365_run", "d365_sql", "d365_build", "d365_db_sync", "d365_best_practice", "d365_job"}
-D365_READER = {"d365_results", "xref"}
+D365_WRITER = {"d365_run", "d365_sql", "d365_build", "d365_db_sync", "d365_best_practice"}
+# d365_job: reading and waiting are reader work, its stop needs writer (refused above)
+D365_READER = {"d365_results", "d365_logs", "xref", "d365_job"}
 
 
 def test_every_tool_is_classified(tmp_path, index):  # noqa: F811

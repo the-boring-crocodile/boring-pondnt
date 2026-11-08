@@ -26,10 +26,12 @@ what to do when a call returns before the UI settles.
 
 ## Setup
 
-1. **A D365 test user and a dedicated Edge profile.** Use a development or test
-   environment and the permissions needed for the planned checks. Sign-in happens
-   in Edge; the service reuses that session. Choose the intended environment and
-   an existing company before signing in; `usmf` below is a Contoso example.
+1. **A D365 sign-in and a service Edge profile.** The usual sign-in is the
+   developer's D365 user. A dedicated D365 test user is optional, per box,
+   where the tenant permits it; it needs the permissions for the planned checks.
+   The service reuses the identity signed in to its profile. Choose the
+   intended development/test environment and an existing company first;
+   `usmf` below is a Contoso example.
 2. **Sign the profile in once**, on the machine's desktop (an interactive session, not over SSH).
    The short way: double-click `browser-signin.cmd` in the release folder, as
    yourself. It asks for the service, suggests the AOS address from the box's
@@ -46,13 +48,17 @@ what to do when a call returns before the UI settles.
 
    Sign in, wait for the dashboard, close Edge. A profile is in use by one Edge at a time: close the
    server's browser first (`web_close`) when you sign in again.
-3. **`d365web.json`** in the service folder (`C:\temp\ci\d365web.json` for the devbox tunnel):
+3. **`d365web.json`** in
+   `%LOCALAPPDATA%\boring-pondnt\services\d365web\d365web.json` for local setup
+   (a tunnel launcher uses its separately configured service file):
 
    ```json
    {"url": "https://usnconeboxax1aos.cloud.onebox.dynamics.com", "company": "usmf",
     "profile": "d365web", "debug_port": 9333, "headless": true,
     "idle_minutes": 30, "step_timeout": 900}
    ```
+
+   Optional `"backend": "model"` (the default) or `"input"`; see [Backends](#backends-model-and-input).
 
    | key | meaning |
    |---|---|
@@ -70,12 +76,34 @@ what to do when a call returns before the UI settles.
    `-Gateway all` for the recommended routing: core and Knowledge direct, the
    other selected services through Ferry.
 
+### Optional dedicated D365 test user
+
+Keep the same Windows account that runs the backend. Close its browser with
+`web_close` before changing profile settings. In the complete `d365web.json`,
+choose a separate `profile`, such as `d365web-test`, and an unused
+`debug_port`, such as 9335. If `profiles_dir` is set, it overrides
+`profile`; choose a separate complete directory there instead.
+
+Run `browser-signin.cmd d365web` on that account's desktop. The helper reads
+the existing configuration and leaves it unchanged. Sign in with the chosen
+test user's D365 account, using the tenant's account-selection flow; wait
+for the intended environment/company and close Edge. Restart the backend
+through setup with the complete installed service selection to load changed
+settings. Check `web_state` after opening the intended menu item.
+
+This changes the browser's D365 identity, not the Windows process identity.
+The developer sign-in remains a valid choice. Tenant policy, user licensing
+and D365 permissions stay with the environment's administrator.
+
 The service can attach to an Edge already listening on its configured debugging
 port. Reserve that port for this profile; an occupied port alone does not establish
 which browser owns it. Keep unrelated browsing in another profile. When changing
 `headless`, finish and collect the current operation, close the service browser,
 then restart the service with the changed configuration. Attaching to an existing
 browser does not change how that browser was launched.
+An attached browser reports `browser_mode_mismatch` when its command line differs
+from the configured headless mode, or `browser_mode_unknown` when Edge cannot
+supply that evidence.
 
 ## Tools
 
@@ -87,18 +115,32 @@ pane can stay unpinned; controls in collapsed panes or another form are excluded
 Pressing a tab or FastTab targets its own header, including when its content
 contains links. A missing or ambiguous visible header is refused with
 `reason: tab_header_unavailable`; discover the actual control before continuing.
-A `pressed` response records the dispatched click. Use the returned state or a
-scenario expectation to verify the intended transition before deciding to retry.
+A FastTab or section press toggles it, and D365 remembers expanded/collapsed per user across
+sessions: check whether the field you need is in the state before pressing its tab.
+A `pressed` response records the dispatched press (a model command or a click; see Backends); it is
+not proof that anything happened. `web_press`, `web_select_row` and `web_tree` therefore compare the
+page before and after and say what moved:
+
+- `changed`: the parts that moved: `form` (the visible forms), `dialog` (the one in front),
+  `record` (the caption, a grid's active record by its record id, a tree's selected node), `pane`
+  (the expanded action tab, an open menu, expanded FastTabs and selected tabs, open tree nodes),
+  `fields` (values or read-only state in the scope), `messages`, `address`, `browser_dialog`.
+- `unchanged: true` with a `note` when none did: D365 did nothing visible (a swallowed click, a
+  command with no effect here, or work that shows nowhere on this page). Inspect with `web_state`
+  before pressing again; a business action is never retried for you.
+
+Neither is said while D365 is still busy (`idle: false`) or when the page could not be read.
 
 | tool | does |
 |---|---|
-| `web_open(menu_item, company?, kind?)` | navigate to `/?cmp=<company>&mi=<menu item>` (`kind`: action, output) |
+| `web_open(menu_item, company?, kind?)` | navigate to `/?cmp=<company>&mi=<menu item>` (`kind`: action, output); refused while the state reports `unsaved` |
 | `web_state(full?, max_rows?)` | the state now; `full` adds labels and other controls |
-| `web_set(values)` | type into fields in order (click, select all, type, Tab); checkboxes take yes/no. Use `[{"field": "Name", "value": "text"}, ...]`, the advertised MCP schema. Legacy pairs and object maps are also accepted, but maps do not reliably preserve typing order through clients |
-| `web_press(name, nth?)` | click a button, action tab, FastTab or link |
+| `web_set(values)` | set fields in order (see Backends: through the control's viewmodel, else click, select all, type, Tab); checkboxes take yes/no. Use `[{"field": "Name", "value": "text"}, ...]`, the advertised MCP schema. Legacy pairs and object maps are also accepted, but maps do not reliably preserve typing order through clients |
+| `web_press(name, nth?)` | press a button, action tab, FastTab or link |
 | `web_lookup(field, pick?, nth?)` | open a field's lookup; with `pick`, choose the row holding that value |
 | `web_filter(value, column?)` | the list page's quick filter: `value` in `column` (header label or column name; default the first column); `""` clears |
-| `web_select_row(grid?, row?, match?)` | select a grid row by position (rendered rows) or by `{column: value}`, scrolling the grid to find it |
+| `web_select_row(grid?, row?, match?)` | select a grid row by position (rendered rows) or by `{column: value}`, scrolling the grid to find it; answers the `active` record |
+| `web_tree(path, tree?)` | select a tree node by its labels from the root (`["Bank", "Cheques"]`), expanding each parent |
 | `web_grid(grid?, max_rows?, start_row?, all_rows?)` | columns and rows of a grid: the rendered rows, or later rows / all rows by scrolling (see Grids) |
 | `web_key(keys)` | chords to the focused element: `Escape`, `Alt+N`, `Alt+F9`, `Tab Tab Enter` |
 | `web_click(x, y)`, `web_type(text)` | fallbacks by coordinates / into the focused element |
@@ -125,7 +167,16 @@ The state:
 - **Scope**: only the top-most container counts: an open lookup, else the last dialog (including
   message boxes), else the largest visible form. Hidden forms stay in the page and are ignored.
 - **`nth` / `Name[n]`** count visible matches top to bottom: in a grid, `PurchLine_PurchQtyGrid[1]` is
-  the quantity in the second visible row.
+  the quantity in the second visible row. Without `[n]`, a field repeated in grid rows means the
+  grid's active row (where a user types after "Add line"), else the first editable occurrence;
+  `[0]` is the first row. `web_lookup`'s `nth` works the same way (omitted: the active row).
+- **`unsaved`** lists the visible forms whose records hold unsaved changes (D365's own
+  `AreDataSourcesDirty`). `web_open` is refused while it is set: navigating away drops the changes
+  without D365 asking. Save (`SystemDefinedSaveButton`) or leave the form with
+  `SystemDefinedCloseButton`, which saves valid changes. A new record in a create dialog counts, and
+  so does a parameter form right after it opens (D365 initialises its record).
+- **A field that opens a dialog** (D365 asks before applying a customer group's dimensions) stops
+  `web_set` there (`stopped_at`); answer the dialog, then set the remaining fields.
 - **Message boxes** ("Delete record?") are dialogs too: the question is the `caption`, the answer
   `web_press Yes` / `No`.
 - **Hidden buttons** live in collapsed action tabs: press the tab (`Purchase`), then the button.
@@ -150,6 +201,69 @@ The state:
   (`Proforma` → "Posting", `buttonUpdateConfirm` → "Confirm now"); `full=true` shows every label.
 - **Hyperlinks** in grid cells (`input.dyn-hyperlink`) open the record only when their text is hit;
   `web_press` clicks near the start of the text, `web_select_row` avoids link cells.
+- **Active record**: `web_select_row` answers `selected` (the clicked row) and `active`: the record
+  the grid's viewmodel calls active (`row`, `key`, cell `values`, `caption`), the one the detail
+  fields and commands work on. `active_differs: true` means it is not the clicked row (the click was
+  swallowed, or D365 kept the old row): check before acting on the details.
+- **Trees** (`trees` in the state): the rendered nodes with `label`, `level`, `expanded`,
+  `selected`; children of a collapsed node appear once it is expanded. `web_tree` matches labels
+  exactly (case and outer spaces aside); a missing or repeated label is refused with the labels on
+  offer (`options`). Node checkboxes are never touched.
+- **Workspaces**: tiles and count tiles are buttons (`web_press AllCustomers` opens the list).
+  Workspace card lists are not grids and are not read: open their list page instead.
+- **Drop dialogs** ("Get a link", "Add to workspace"): a press opens them as a dialog scope;
+  `web_key Escape` closes one.
+- **Wizards** are forms or dialogs with `Next`, `Back` and `Cancel` buttons; their pages are tabs.
+- **Reference groups** (a worker shown by name): set the group's field as `web_state` lists it
+  (`Worker_DirPerson_FK_Name`); D365 resolves the typed text. The group's own name is refused with
+  its fields (`parts`): a click on the group can open the referenced record.
+- **File uploads** (`uploads` in the state) are not supported: pressing or setting anything in an
+  upload control is refused (`upload`), as Browse opens the operating system's file picker. Cancel
+  the dialog, or upload the file by hand.
+
+## Backends: model and input
+
+`backend` (in `d365web.json`) chooses how `web_set`, `web_press`, `web_lookup`, `web_filter` and the
+grid reads act:
+
+- **`model`** (default): through D365's own client viewmodels -- the objects behind its controls --
+  with the commands a control itself sends to the server (`SetValue`, `SetSelectedItem`,
+  `toggleValue`, `Clicked`, `ExpandedChanged`, a lookup's `SelectionCompleted`, a grid's
+  `LoadNextPage`, the quick filter's `ApplyFilter`). No mouse, no keys, no popups opened to pick
+  from: D365 validates as for a user, and its readback is reported as usual.
+- **`input`**: synthetic mouse and keyboard input, as before 0.2.10.
+
+The model path is per step: where a control has no usable viewmodel the input path runs for that
+step, and `applied`/the answer say `via: model` or `via: input`. Known input steps in model mode:
+grid cells (they have no viewmodel), dates in the user's display format (`11/20/2026` is typed;
+ISO `2026-11-20` goes through the model), times, reference-group fields (`SetValue` on them is not
+resolved: D365 restores the old text), menu buttons (their list opens on a click), tree nodes (the
+tree's commands take node objects the page does not hand out), tab headers (PivotItem), record
+hyperlinks in grids, a lookup pick that is a shown text only or held by more than one row, a control
+in a grid row other than the active one (D365 applies a viewmodel command to the grid's current
+record; the input path clicks that row, which makes it active), a covered control (the model finds
+the control at its position), a quick filter that is not the only one of the scope's form.
+
+A combo value that is not an option is refused with `options` and nothing is typed; a combo already
+holding the value is not set again. A lookup pick matches the rows' text values only (not numbers or
+flags in hidden columns); missing from all of the lookup's rows it is refused and the lookup closed
+without changing the field. After a model pick the answer has the field's `now` and `differs` when
+the field holds none of the chosen row's values. A grid read or lookup stops asking for more rows
+after three pages that bring none.
+
+Never guessed: a lookup pick or a `web_select_row` match that more than one row holds is refused
+with the count (give a value only one row holds); text is typed only into the field that took the
+keyboard focus after its click; `web_open` is refused when D365 does not answer whether the page
+holds unsaved changes. The idle close (`idle_minutes`) waits while a form holds unsaved changes.
+A browser `confirm()` or `prompt()` is cancelled (`browser_dialogs_dismissed`): it may approve
+something nobody asked for; an alert or a leave-page question is accepted (`browser_dialogs_accepted`).
+Ambiguity is judged among the rows a search has seen: `web_select_row` stops at the first window
+that holds a match, so a duplicate further down is not seen; filter the list when values repeat.
+A name both on the form and in a grid's rows means the form's field (`[n]` counts as in
+`web_state`); a name only in grid rows means the rows. An input-backend grid read that had to
+select the last row and page down to load more says `selection_moved`. d365web attaches only to an
+Edge on its own profile (another profile's Edge on the debugging port is left alone), and the idle
+close waits while d365whsapp's form tabs hold logged-in workers.
 
 ## Waiting and uncertain outcomes
 
@@ -163,7 +277,7 @@ or a transaction was saved.
 |---|---|
 | `status: running` | Call `web_wait` until it returns the original result or error. Other steps, including state reads, are refused as `busy` while that result remains uncollected. |
 | `idle: false` | The configured settle timeout expired while D365 still appeared busy. Use `web_wait` to observe it; do not repeat the action. |
-| `pressed`, but the expected transition is absent | Inspect the returned state, then the current state once no result is pending. Click dispatch is not confirmation that D365 handled it. |
+| `unchanged: true`, or `pressed` without the expected transition | Inspect the returned state, then the current state once no result is pending. Dispatch is not confirmation that D365 handled it; nothing is retried for you. |
 | Timeout or connection error after dispatch | The action may have run. Check application state and any persisted effect before deciding to resubmit. |
 | A visible browser behaves differently | Before 0.2.8, a visible Edge in a covered, locked or unviewed session stopped rendering, and the first click or key after `web_open` could be lost. 0.2.8 launches it with occlusion detection and background throttling off. If it still differs, compare a fresh headless launch. A longer timeout cannot establish that input reached the intended control. |
 
@@ -190,6 +304,11 @@ would have to scroll to is not there for a reader of the page either.
   (`web_state`: 20 by default, `max_rows` up to 200; `web_grid`: 50 by default, up to 200).
 - `web_grid(start_row=N, max_rows=M)` scrolls the list from the top like a person, collecting
   rows until N+M are known; `more` says whether rows follow. `all_rows=true` scrolls to the end.
+  Grids that hide their overflow (FixedDataTable) are scrolled with a wheel event on their rows;
+  this moves no selection.
+- With the model backend, a list with more records than loaded asks the grid for its remaining
+  blocks (`LoadNextPage`) and reads again; it never clicks a row or presses PageDown. Without a
+  grid viewmodel it answers `more` instead. The input backend selects the last row and pages down.
 - Rows are told apart by D365's row index (`aria-rowindex`, returned as `key`), else by their
   values. A scan stops at 1000 rows (`truncated: true`): filter the grid instead.
 - `web_select_row(match=...)` and a scenario's `expect.grid.contains` search the same way when
@@ -213,18 +332,22 @@ company, order, customer and localized column labels with your fixture values:
    "save": {"caption": "caption"}}]}
 ```
 
-- `op`: open, state, set, press, lookup, filter, select_row, key, with the arguments of those tools.
+- `op`: open, state, set, press, lookup, filter, select_row, key, tree, with the arguments of those tools.
 - `expect`: `scope`, `form`, `caption` (substring), `fields` {name or label: value, D365 formatting
   allowed}, `editable` [fields], `message` (substring of a new message), `no_errors` (no new error or
   warning), `enabled` / `disabled` [buttons], `grid` {`name`, `rows`, `contains` {column: value}}.
-- `save`: `"caption"`, `"field:NAME"`, `"message"`, `"grid:COLUMN"`, or {`from`, `regex`, `row`, `grid`};
-  `${name}` in later steps. The full list is checked before submission: required arguments,
+- `save` accepts `"caption"`, `"field:NAME"`, `"message"`, `"grid:COLUMN"`, or
+  {`from`, `regex`, `row`, `grid`}. A grid column matches its technical name or label,
+  searching grids in page order and using the first grid containing that column.
+  To choose a grid, use `{"from": "grid:WorkUser", "grid": "WorkUsers"}`.
+  Use `${name}` in later steps. The full list is checked before submission: required arguments,
   types, nested expectations and save specifications (including regex syntax). Unknown variables
   and unknown keys are refused before anything runs. Variables saved by an earlier page are
   checked when available; invalid or missing saved data stops the dependent step with the prior
   transcript retained. Numeric row/count strings are accepted; indices/counts must be nonnegative
   integers (max_rows at least 1). Save specs are static and are not variable-substituted.
-- The answer: `ok`, one transcript line per step (`at`, `caption`, `messages`, `differs`, `saved`,
+- The answer: `ok`, one transcript line per step (`at`, `caption`, `messages`, `differs`, `unchanged`,
+  `changed`, `active_differs`, `saved`,
   `mismatch` or `error`), `variables`, and `final` (scope, form, caption, messages; `full_final` for the page).
 
 An example scenario across both services: `tests/scenarios/example-purchase-receipt.json`.
@@ -276,9 +399,13 @@ as you would do them on the box's desktop:
    powershell -ExecutionPolicy Bypass -File .\setup.ps1 -Yes -SkipIndex -Gateway all -Services 'sourcecache,knowledge,canvas,core,d365,d365web' -Index J:\pondnt\d365.db
    ```
 
-   The preview names `boring-d365web` as a new service carried by
-   boring-gateway, and every other key as kept. The `.mcp.json` entries do
-   not change, so Visual Studio needs no new connection.
+   These commands cover the five default services plus d365web. Retain
+   any installed d365whsapp or d365data in both service lists too; prepare
+   their configuration before selecting them. The preview should show the
+   intended full selection and routing. Existing keys are kept when valid
+   with at least 30 days left. Client publication can change entries or
+   credentials when needed; inspect setup's result and refresh the client
+   if its managed configuration changed.
 4. **Find it through the gateway.** In Visual Studio (Copilot, Agent mode),
    ask for boring-gateway's `service_list`: `d365web` is listed and answers.
    `service_describe` with `{"service": "d365web"}` shows its tools and this
@@ -296,8 +423,9 @@ as you would do them on the box's desktop:
    with its filter and buttons; nothing was created. `service_call` with
    `web_close` ends it. Steps 4 and 5 were tried once like this on our test
    box, through its real gateway (pondNT 0.2.8, application 10.0.49), where
-   d365web was already set up; steps 1 to 3 are the setup described above, with `browser-signin.cmd`
-for steps 1 and 2.
+   d365web was already set up. That live check establishes discovery and
+   inspection, not a fresh-install run of this whole recipe; steps 1 to 3
+   follow the shipped sign-in helper and setup implementation.
 
 If step 5 answers `signin_required`, the profile's sign-in expired or
 belongs to another profile: run `browser-signin.cmd` again (it takes the
@@ -318,3 +446,5 @@ browser mode or later release.
   busy indicators instead of relying on a fixed startup delay.
 - When the profile's sign-in expires, steps answer `signin_required`: sign in again (Setup 2).
 - Steps change real data in the connected D365.
+- Not supported: file uploads (refused), workspace card lists (not read), tree node checkboxes.
+  Grid cells have no viewmodel of their own: they are set through the input path.

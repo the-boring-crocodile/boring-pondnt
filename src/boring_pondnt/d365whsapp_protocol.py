@@ -28,7 +28,9 @@ MESSAGE_STATUS_INFO = "3"
 XML_DECLARATION = '<?xml version="1.0" encoding="utf-8"?>'
 
 _ATTRIBUTE_VALUE = re.compile(r'="[^"]*"')
-_ERROR_CODE = re.compile(r"\b([A-Z][A-Z0-9_]{4,})\s*$")
+# only the protocol's own codes: "Item not found: WAREHOUSE24" is a message, not a code
+_ERROR_CODE = re.compile(r"\b((?:REQUEST|ERROR)_[A-Z0-9_]{3,}|MULTI_DEVICE_USER_LOGIN)\s*$")
+_XML_INVALID = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f\ufffe\uffff]")
 _ERROR_PREFIX = "An exception occured when invoking the operation - "
 
 
@@ -200,6 +202,8 @@ def build_request(page: Page, values: dict[str, str] | None = None, press: str |
             raise ProtocolError(f"{name!r} is read-only on this page")
         if not isinstance(value, str):
             raise ProtocolError(f"value for {name!r} must be a string")
+        if _XML_INVALID.search(value):
+            raise ProtocolError(f"value for {name!r} holds a control character the request cannot carry")
         if control.length > 0 and len(value) > control.length:
             raise ProtocolError(f"{name!r} takes at most {control.length} characters")
     if press is not None:
@@ -209,6 +213,10 @@ def build_request(page: Page, values: dict[str, str] | None = None, press: str |
         if not control.enabled:
             raise ProtocolError(f"button {press!r} is disabled")
     root = _copy(page.root)
+    names = [node.get("name", "") for node in root.find("Controls").findall("Control")]  # type: ignore[union-attr]
+    for name in list(values) + ([press] if press is not None else []):
+        if names.count(name) > 1:  # the echo would write every control of that name, a label included
+            raise ProtocolError(f"{name!r} names more than one control on this page; nothing was sent")
     for node in root.find("Controls").findall("Control"):  # type: ignore[union-attr]
         name = node.get("name", "")
         if name in values:
@@ -246,7 +254,9 @@ def parse_service_error(status: int, body: str) -> ServiceError:
     try:
         data = json.loads(message)
         if isinstance(data, dict):
-            message = str(data.get("Message") or (data.get("error") or {}).get("message") or message)
+            error = data.get("error")
+            nested = error.get("message") if isinstance(error, dict) else (error if isinstance(error, str) else None)
+            message = str(data.get("Message") or nested or message)
     except ValueError:
         pass
     if message.startswith(_ERROR_PREFIX):

@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from .d365whsapp_steplog import Entry, describe, describe_values as _describe_values, masked
+from .d365whsapp_steplog import MASK, Entry, describe, describe_values as _describe_values, masked
 from .whs_steps import View
 
 BUTTON_ROLES = {"CommandButton", "Button", "MenuItemButton"}
@@ -43,9 +43,10 @@ def page_from_form(raw: dict[str, Any]) -> dict[str, Any]:
     if message:
         # no kind: the form paints info and error messages alike (rgb(255, 60, 60), 2026-10-23)
         page["message"] = {"text": message["text"].strip()}
-    page["buttons"] = [c["name"] for c in controls if c.get("role") in BUTTON_ROLES]
+    page["buttons"] = [c["name"] for c in controls if c.get("role") in BUTTON_ROLES and not c.get("disabled")]
     page["fields"] = inputs
     page["readonly"] = sorted(c["name"] for c in controls if c.get("readonly"))
+    page["_passwords"] = sorted(c["name"] for c in controls if c.get("password"))
     page["labels"] = labels
     page["_names"] = sorted(names)
     page["_button_text"] = {c["name"]: c.get("text", "") for c in controls if c.get("role") in BUTTON_ROLES}
@@ -83,8 +84,11 @@ def view_of(page: dict[str, Any]) -> View:
 
 
 def describe_values(values: dict[str, Any] | None, page: dict[str, Any] | None) -> str:
-    """{label [name]: value} for the step log, against a form page."""
-    return _describe_values(values, (page or {}).get("labels") or {})
+    """{label [name]: value} for the step log, against a form page; a password-type field is masked
+    by its kind even when its name does not say password."""
+    secret_inputs = set((page or {}).get("_passwords") or ())
+    shown = {k: (MASK if v and k in secret_inputs else v) for k, v in (values or {}).items()}
+    return _describe_values(shown or values, (page or {}).get("labels") or {})
 
 
 def describe_page(page: dict[str, Any]) -> list[str]:

@@ -13,7 +13,7 @@ from test_d365whsapp_server import call, FORM_S1
 
 @pytest.fixture
 def web():
-    client = WebClient(Config(url="https://fixture.invalid"), budget=0.1)
+    client = WebClient(Config(url="https://fixture.invalid", backend="input"), budget=0.1)  # input path
     try:
         yield client
     finally:
@@ -93,9 +93,17 @@ def setting_fixture(web, backend, outcome):
         if op == "messages":
             return [warning] if typed and outcome == "warning" else []
         if op == "locate":
+            if outcome == "password_blank":  # D365's password input reads back empty (live, 10.0.49)
+                return {"value": "" if args[0] == "Password" else typed[-1]}
             return {"value": "" if outcome in ("warning", "differs") else typed[-1]}
         if op == "whsform":
             return FORM_S1
+        if op == "scope":  # web_set checks whether a field opened a dialog; the form stays put
+            return {"scope": "dialog", "form": "WHSWorkExecute"}
+        if op == "model:dirty":
+            return {"unsaved": []}
+        if op == "focusedAt":  # the clicked field has the focus
+            return True
         raise AssertionError(op)
 
     web._js = js
@@ -166,3 +174,76 @@ def test_form_public_page_masks_secret_fields():
     raw = {"page": "Login", "fields": {"UserId": "W1", "Password": "s3cret", "Pin": "42"}}
     assert public(raw)["fields"] == {"UserId": "W1", "Password": "***", "Pin": "***"}
     assert raw["fields"]["Password"] == "s3cret"  # browser state is not mutated
+
+
+def test_login_presses_when_only_the_password_reads_back_empty(web, tmp_path):
+    """D365 keeps a typed password outside the input; readback cannot confirm it. The page after
+    Login decides (login_failed on the Login page), so the login must not stop before pressing."""
+    backend = FormBackend(web)
+    typed, pressed = setting_fixture(web, backend, "password_blank")
+    server = create_server(backend, tmp_path, log_calls=True)
+    error, result = call(server, "whs_login", {"worker": "W1", "password": "s3cret"})
+    if error and result["code"] == "step_running":
+        web.runs.get(BROWSER).future.exception(timeout=5)
+        error, result = call(server, "whs_screen", {"worker": "W1"})
+    assert typed == ["W1", "s3cret"] and pressed == ["Login"]
+    assert "s3cret" not in str(result)
+
+
+def test_submit_still_stops_when_a_plain_field_reads_back_empty(web, tmp_path):
+    backend = FormBackend(web)
+    typed, pressed = setting_fixture(web, backend, "differs")
+    server = create_server(backend, tmp_path, log_calls=True)
+    error, result = call(server, "whs_submit", {"worker": "W1", "values": {"Password": "x", "Batch": "B1"},
+                                                 "press": "OK"})
+    if error and result["code"] == "step_running":
+        web.runs.get(BROWSER).future.exception(timeout=5)
+        error, result = call(server, "whs_screen", {"worker": "W1"})
+    assert error and result["code"] == "set_incomplete" and pressed == []
+
+
+def _login_backend(web, monkeypatch, press_error=None, set_error=None):
+    backend = FormBackend(web)
+    closed = []
+
+    @contextmanager
+    def tab(worker, create=False):
+        yield None
+    monkeypatch.setattr(backend, "_tab", tab)
+    monkeypatch.setattr(web, "_js", lambda op, *a: {"controls": []} if op == "whsform" else None)
+    monkeypatch.setattr(backend, "_walk_out", lambda: {"page": "Login"})
+    def set_values(values):
+        if set_error:
+            raise set_error
+    monkeypatch.setattr(backend, "_set", set_values)
+    def press(name):
+        if press_error:
+            raise press_error
+    monkeypatch.setattr(backend, "_press", press)
+    monkeypatch.setattr(backend, "_close_tab", closed.append)
+    return backend, closed
+
+
+def test_an_error_after_pressing_login_says_not_to_retry_the_password(web, monkeypatch):
+    backend, closed = _login_backend(web, monkeypatch, press_error=D365WebError("unexpected", "an infolog box"))
+    with pytest.raises(D365WebError) as caught:
+        backend._op_login("W1", "pw", None)
+    assert caught.value.code == "login_outcome_unknown" and "do not retry the password" in caught.value.message
+    assert closed == []  # the tab stays for whs_screen
+
+
+def test_a_login_that_failed_before_the_press_drops_the_tab_it_made(web, monkeypatch):
+    backend, closed = _login_backend(web, monkeypatch, set_error=D365WebError("set_incomplete", "did not take"))
+    with pytest.raises(D365WebError) as caught:
+        backend._op_login("W1", "pw", None)
+    assert caught.value.code == "set_incomplete" and closed == ["W1"]
+
+
+def test_login_on_a_tab_with_a_session_resumes_it_without_typing(web, monkeypatch):
+    backend, closed = _login_backend(web, monkeypatch, press_error=AssertionError("nothing is pressed"),
+                                     set_error=AssertionError("nothing is typed"))
+    backend.tabs["W1"] = object()  # the worker's tab exists
+    work = {"page": "work", "title": "Item inquiry", "fields": {"ItemId": ""}}
+    monkeypatch.setattr(backend, "_page", lambda: dict(work))
+    page = backend._op_login("W1", "pw", None)
+    assert page["title"] == "Item inquiry" and page["resumed"] is True and closed == []

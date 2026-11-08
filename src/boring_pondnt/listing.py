@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import fnmatch
 import os
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -21,6 +22,9 @@ LIST_MAX = 1000
 SEARCH_DEFAULT = 100
 SEARCH_MAX = 500
 SEARCH_MAX_FILES = 20_000  # files examined per call; the walk stops beyond it
+# A slow share or a deep tree can make 20,000 files take minutes: the call answers in time
+# with what it found rather than outlasting its caller.
+SEARCH_SECONDS = 60.0
 SNIPPET_CHARS = 200
 SKIP_DIRS = {".git", ".vs", "node_modules", "__pycache__"}
 
@@ -90,9 +94,13 @@ def search(
     glob: str | None = None,
     limit: int = SEARCH_DEFAULT,
     ignore_case: bool = False,
+    seconds: float = SEARCH_SECONDS,
 ) -> dict[str, Any]:
-    """Literal text search in one file or a tree. Lines are shown as `read_text` shows them."""
+    """Literal text search in one file or a tree. Lines are shown as `read_text` shows them.
+
+    After `seconds` the walk stops and the matches so far are returned, `stopped: "time"`."""
     check_search(query, limit)
+    deadline = time.monotonic() + seconds
     root = disk.absolute(path)
     if not root.exists():
         raise Refused("not_found", "path does not exist", path=str(root))
@@ -102,16 +110,24 @@ def search(
     stopped = None  # why the walk ended early, if it did
 
     def files():
+        nonlocal stopped
         if root.is_file():
             yield root
             return
         for dirpath, dirnames, filenames in os.walk(root):
+            # checked per directory too: a glob that matches nothing still walks the whole tree
+            if time.monotonic() >= deadline:
+                stopped = "time"
+                return
             dirnames[:] = sorted(d for d in dirnames if d not in SKIP_DIRS)
             for name in sorted(filenames):
                 if glob is None or fnmatch.fnmatch(name.lower(), glob.lower()):
                     yield Path(dirpath) / name
 
     for file in files():
+        if time.monotonic() >= deadline:
+            stopped = "time"
+            break
         if examined >= SEARCH_MAX_FILES:
             stopped = "max_files"
             break
@@ -130,7 +146,7 @@ def search(
                 matches.append({"path": str(file), "line": number, "text": line.strip()[:SNIPPET_CHARS]})
         if stopped == "limit":
             break
-    return {
+    result = {
         "path": str(root),
         "matches": matches,
         "files_examined": examined,
@@ -138,3 +154,6 @@ def search(
         "truncated": stopped is not None,
         "stopped": stopped,
     }
+    if stopped == "time":
+        result["note"] = f"Search stopped after {seconds:g} s; matches are partial. Narrow path or glob."
+    return result

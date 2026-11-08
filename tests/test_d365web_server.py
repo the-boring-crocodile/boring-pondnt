@@ -8,7 +8,7 @@ import json
 from boring_pondnt.d365web_client import D365WebError, StillRunning
 from boring_pondnt.d365web_server import create_server
 
-TOOLS = {"web_open", "web_state", "web_set", "web_press", "web_lookup", "web_select_row", "web_grid", "web_key", "web_filter", "web_run_scenario",
+TOOLS = {"web_open", "web_state", "web_set", "web_press", "web_lookup", "web_select_row", "web_tree", "web_grid", "web_key", "web_filter", "web_run_scenario",
          "web_click", "web_type", "web_wait", "web_screenshot", "web_close"}  # no WHS tools: d365whsapp form mode (D38)
 
 
@@ -39,6 +39,9 @@ class FakeClient:
 
     def select_row(self, grid="", row=0, match=None):
         return self._record("select_row", grid, row, match)
+
+    def tree(self, path, tree=""):
+        return self._record("tree", path, tree)
 
     def run_scenario(self, steps, variables=None, stop_on_mismatch=True, full_final=False):
         return self._record("run_scenario", steps, variables, stop_on_mismatch, full_final)
@@ -93,7 +96,11 @@ def call(server, name, args=None):
 def test_tools_and_budget(tmp_path):
     client = FakeClient()
     server = create_server(client, tmp_path, log_calls=True, call_budget=28.0)
-    assert {t.name for t in asyncio.run(server.list_tools())} == TOOLS
+    tools = asyncio.run(server.list_tools())
+    assert {t.name for t in tools} == TOOLS
+    listed = json.dumps([t.model_dump(by_alias=True, exclude_none=True) for t in tools],
+                        ensure_ascii=False, separators=(",", ":"))
+    assert len(listed) <= 9_760  # 7,760 + 2,000
     assert client.budget == 25.0 and client.state_dir == tmp_path
 
 
@@ -115,6 +122,13 @@ def test_results_running_and_outcomes(tmp_path):
     with pytest.raises(Exception, match="unknown: bogus"):
         call(server, "web_press", {"name": "OK", "bogus": 1})
     assert (tmp_path / "calls-d365web.jsonl").is_file()
+
+
+def test_web_tree_passes_the_path(tmp_path):
+    client = FakeClient()
+    server = create_server(client, tmp_path)
+    error, state = call(server, "web_tree", {"path": ["Bank", "Cheques"], "tree": "TreeKeys"})
+    assert not error and client.calls[-1] == ("tree", (["Bank", "Cheques"], "TreeKeys"))
 
 
 def test_tool_schemas_are_strict_for_copilot(tmp_path):

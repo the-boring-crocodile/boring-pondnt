@@ -69,14 +69,16 @@ def test_redact_masks_passwords_in_every_form():
     assert "abc" not in redact("connect=x;Password='abc") and "def" not in redact('Pwd="def')  # cut off, unclosed
 
 
-def test_tools_are_eight_and_small(server):
+def test_tools_are_nine_and_small(server):
     """D40: own tools only where they redact, parse or guard; d365_run for the rest of d365fo.tools."""
     tools = asyncio.run(server.list_tools())
     assert sorted(t.name for t in tools) == sorted([
         "d365_build", "d365_results", "d365_db_sync", "d365_best_practice", "d365_job", "d365_sql",
-        "d365_run", "xref"])
+        "d365_run", "d365_logs", "xref"])
     assert all(len(t.description or "") <= 120 for t in tools)
-    assert len(json.dumps([t.model_dump(exclude_none=True) for t in tools])) < 8500
+    listed = json.dumps([t.model_dump(by_alias=True, exclude_none=True) for t in tools],
+                        ensure_ascii=False, separators=(",", ":"))
+    assert len(listed) <= 10_567  # 6,267 + 4,300
 
 
 def test_run_returns_text_masked_and_bounded(server):

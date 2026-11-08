@@ -23,11 +23,11 @@ from contextlib import asynccontextmanager
 
 import anyio
 from pathlib import Path
-from typing import Any, Callable
+from typing import Annotated, Any, Callable
 
 from mcp.server.mcpserver import MCPServer
 from mcp.types import ToolAnnotations
-from pydantic import ValidationError
+from pydantic import Field, ValidationError
 
 from . import __version__, binfiles, disk, execs, jobs, listing, textfiles
 from .core_file_tools import register_file_tools
@@ -53,6 +53,15 @@ BATCH_TIMEOUT_DEFAULT = 300.0
 BATCH_TIMEOUT_MAX = 600.0
 BATCH_RESULT_MAX = 256 * 1024  # characters of all step results together (initial)
 NOT_IN_BATCH = {"bootstrap", "batch"}
+BATCH_POLICIES = ("stop", "continue")
+CommandShell = Annotated[str | None, Field(
+    description="Use a shell listed for this platform. Omit or pass an empty string for the default.",
+    json_schema_extra={"enum": (*(execs.SHELLS_WINDOWS if execs.IS_WINDOWS else execs.SHELLS_POSIX), "", None)},
+)]
+
+
+# Each server its own name: support bundles collect several state folders flat.
+CALL_LOG = "calls-core.jsonl"
 
 
 def long_paths_enabled() -> bool | None:
@@ -144,8 +153,7 @@ def create_server(kit: Path | None = None, state_dir: Path | None = None,
     exec_default = min(execs.TIMEOUT_DEFAULT, budget) if budget else execs.TIMEOUT_DEFAULT
     wait_default = min(30.0, budget) if budget else 30.0
     batch_default = min(BATCH_TIMEOUT_DEFAULT, budget) if budget else BATCH_TIMEOUT_DEFAULT
-    shells = "default PowerShell 7; powershell=5.1, cmd"
-    limit = f"<={budget:g} s here; longer: job_start" if budget else "<=600 s"
+    limit = f" Up to {budget:g} s here." if budget else ""
     job_manager: list[jobs.Jobs] = []  # discovery does not create state
     manager_lock = threading.Lock()
     closed = False
@@ -178,7 +186,7 @@ def create_server(kit: Path | None = None, state_dir: Path | None = None,
                     token_verifier=token_verifier, auth=auth, auth_server_provider=auth_server_provider,
                     lifespan=lifespan)
     attach_heartbeat(mcp, on_discover)
-    log = CallLog((state_dir or default_state_dir("boring-pondnt")) / "calls.jsonl" if log_calls else None)
+    log = CallLog((state_dir or default_state_dir("boring-pondnt")) / CALL_LOG if log_calls else None)
     plain: dict[str, Callable[..., dict[str, Any]]] = {}
     roles: dict[str, str] = {}
     def check_arguments(method: str, args: dict[str, Any]) -> None:
@@ -230,52 +238,123 @@ def create_server(kit: Path | None = None, state_dir: Path | None = None,
 
     @tool(READ_ONLY, "reader")
     def bootstrap() -> dict[str, Any]:
-        """Start here once per session: the working agreement and what this machine offers."""
+        """Read the working agreement and handbook file list. Use guides such as d365.md and data.md for workflows."""
         return bootstrap_result(kit)
 
-    register_file_tools(tool)
+    register_file_tools(tool, budget)
 
     @tool(RUNS, "writer")
-    @described(f"Run a command ({shells}); exit code, bounded output. {limit}.")
-    def exec(command: str, shell: str | None = None, cwd: str | None = None,
-             timeout_seconds: float = exec_default) -> dict[str, Any]:
+    @described("Run a command and return exit code and bounded output. For long commands, use job_start." + limit)
+    def exec(
+        command: Annotated[str, Field(description="Command text in the chosen shell.")],
+        shell: CommandShell = None,
+        cwd: Annotated[str | None, Field(
+            description="Working directory on the server. Omit to use the current directory.",
+        )] = None,
+        timeout_seconds: Annotated[float, Field(
+            description="Seconds allowed for the command. A service may set a lower limit.",
+            json_schema_extra={"minimum": 0.1, "maximum": execs.TIMEOUT_MAX},
+        )] = exec_default,
+    ) -> dict[str, Any]:
         within_budget("timeout_seconds", timeout_seconds)
         return execs.run(command, default_shell(shell), cwd, timeout_seconds)
 
     @tool(RUNS, "writer")
-    def job_start(command: str, shell: str | None = None, cwd: str | None = None,
-                  timeout_seconds: float = 3600.0) -> dict[str, Any]:
-        """Start a long command (build, sync, tests) in the background; returns job_id. <=24 h."""
+    def job_start(
+        command: Annotated[str, Field(description="Command text in the chosen shell.")],
+        shell: CommandShell = None,
+        cwd: Annotated[str | None, Field(
+            description="Working directory on the server. Omit to use the current directory.",
+        )] = None,
+        timeout_seconds: Annotated[float, Field(
+            description="Seconds allowed for the command. Maximum 24 hours.",
+            json_schema_extra={"minimum": 0.1, "maximum": jobs.TIMEOUT_MAX},
+        )] = 3600.0,
+    ) -> dict[str, Any]:
+        """Start a command in the background. Use job_wait with its job_id, then job_output for stdout or stderr."""
         return manager().start(command, default_shell(shell), cwd, timeout_seconds)
 
     @tool(READ_ONLY, "reader")
-    @described("Status of jobs (state, exit code, duration, output sizes); waits up to "
-               + (f"{budget:g} s here" if budget else "60 s") + " for all to end. 0 = just status.")
-    def job_wait(job_ids: list[str], wait_seconds: float = wait_default) -> dict[str, Any]:
+    @described("Read job states. Repeat while running, then use job_output for output." + limit)
+    def job_wait(
+        job_ids: Annotated[list[str], Field(
+            description="IDs from job_start.",
+            json_schema_extra={
+                "minItems": 1,
+                "maxItems": 32,
+                "items": {"type": "string", "pattern": "^[0-9a-f]{32}$"},
+            },
+        )],
+        wait_seconds: Annotated[float, Field(
+            description=(
+                "Seconds to wait for all jobs. Zero reads status immediately. A service may set a "
+                "lower limit."
+            ),
+            json_schema_extra={"minimum": 0, "maximum": jobs.WAIT_MAX},
+        )] = wait_default,
+    ) -> dict[str, Any]:
         within_budget("wait_seconds", wait_seconds)
         return manager().wait(job_ids, wait_seconds)
 
     @tool(READ_ONLY, "reader")
-    def job_output(job_id: str, stream: str = "stdout", tail_lines: int | None = None,
-                   start_line: int | None = None, line_count: int = jobs.OUTPUT_LINES_DEFAULT) -> dict[str, Any]:
-        """A job's output: last tail_lines (default 100), or line_count lines from start_line."""
+    def job_output(
+        job_id: Annotated[str, Field(
+            description="Job ID returned by job_start.",
+            json_schema_extra={"pattern": "^[0-9a-f]{32}$"},
+        )],
+        stream: Annotated[str, Field(json_schema_extra={"enum": jobs.OUTPUT_STREAMS})] = "stdout",
+        tail_lines: Annotated[int | None, Field(
+            description="Last N lines. Cannot be used with start_line.",
+            json_schema_extra={"minimum": 1, "maximum": jobs.OUTPUT_LINES_MAX},
+        )] = None,
+        start_line: Annotated[int | None, Field(
+            description="First line, counted from 1. Omit both line selectors for the last 100 lines.",
+            json_schema_extra={"minimum": 1},
+        )] = None,
+        line_count: Annotated[int, Field(
+            description="Number of lines (1–2,000) when tail_lines is omitted. Ignored with tail_lines.",
+        )] = jobs.OUTPUT_LINES_DEFAULT,
+    ) -> dict[str, Any]:
+        """Read one stream of a job's output. Continue with start_line when reading by line."""
         return manager().output(job_id, stream, tail_lines, start_line, line_count)
 
     @tool(WRITES, "writer")
-    def job_stop(job_id: str) -> dict[str, Any]:
-        """Stop a job and everything it started."""
+    def job_stop(
+        job_id: Annotated[str, Field(
+            description="Job ID returned by job_start.",
+            json_schema_extra={"pattern": "^[0-9a-f]{32}$"},
+        )],
+    ) -> dict[str, Any]:
+        """Stop a background job and its child processes. Use job_wait to check the final state."""
         return manager().stop(job_id)
 
     @tool(READ_ONLY, "reader")
-    def job_list(limit: int = 20) -> dict[str, Any]:
-        """This session's jobs, newest first."""
+    def job_list(
+        limit: Annotated[int, Field(json_schema_extra={"minimum": 1, "maximum": jobs.LIST_MAX})] = 20,
+    ) -> dict[str, Any]:
+        """Read this session's jobs, newest first. Use job_output to read a job's output."""
         return manager().list(limit)
 
     @tool(RUNS, "reader")  # each step needs its own role: checked in check_arguments
-    @described("Several file/exec/job steps in one call, in order: {id, method, arguments}. Saves round trips."
-               + (f" All within {budget:g} s here." if budget else ""))
-    def batch(operations: list[dict[str, Any]], on_error: str = "stop",
-              timeout_seconds: float = batch_default) -> dict[str, Any]:
+    @described("Check and run this server's file, exec and job calls in order. Earlier effects remain if a step fails." + limit)
+    def batch(
+        operations: Annotated[list[dict[str, Any]], Field(
+            description=(
+                "Steps with a unique id, this server's method name and optional arguments object. "
+                "No nested batch or bootstrap."
+            ),
+            json_schema_extra={"minItems": 1, "maxItems": BATCH_MAX_STEPS},
+        )],
+        on_error: Annotated[str, Field(
+            description="Stop skips the remaining steps after an error. Continue attempts them.",
+            json_schema_extra={"enum": BATCH_POLICIES},
+        )] = "stop",
+        timeout_seconds: Annotated[float, Field(
+            description=("Seconds for all steps together: no step starts after it; exec and job_wait steps get "
+                         "only what remains, other steps run to their own limits. A service may set a lower limit."),
+            json_schema_extra={"minimum": 0.1, "maximum": BATCH_TIMEOUT_MAX},
+        )] = batch_default,
+    ) -> dict[str, Any]:
         within_budget("timeout_seconds", timeout_seconds)
         return run_batch(mcp, plain, operations, on_error, timeout_seconds, check_arguments)
 
@@ -298,7 +377,7 @@ def run_batch(mcp: MCPServer, plain: dict[str, Callable[..., dict[str, Any]]],
               operations: list[dict[str, Any]], on_error: str, timeout_seconds: float,
               check_arguments: Callable[[str, dict[str, Any]], None] | None = None) -> dict[str, Any]:
     """Like the Pond's batch: every step is checked before any runs; no rollback."""
-    if on_error not in ("stop", "continue"):
+    if on_error not in BATCH_POLICIES:
         raise Refused("invalid_request", "on_error must be stop or continue")
     if not 0.1 <= timeout_seconds <= BATCH_TIMEOUT_MAX:
         raise Refused("invalid_request", f"timeout_seconds must be 0.1-{BATCH_TIMEOUT_MAX:g}")
@@ -394,7 +473,7 @@ def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(prog="boring-pondnt-core", description=INSTRUCTIONS)
     parser.add_argument("--handbook", dest="kit", type=Path, help="handbook folder with bootstrap.md")
     parser.add_argument("--state-dir", type=Path, help=f"job output, call log (default {default_state_dir('boring-pondnt')})")
-    parser.add_argument("--no-call-log", action="store_true", help="do not write calls.jsonl")
+    parser.add_argument("--no-call-log", action="store_true", help=f"do not write {CALL_LOG}")
     parser.add_argument("--self-check", action="store_true", help="check this machine, print JSON, exit")
     http = parser.add_argument_group("HTTP (the only transport; setup.ps1 writes the configuration)")
     add_config_argument(http)

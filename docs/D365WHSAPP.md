@@ -53,7 +53,7 @@ Tools are writer-only unless noted:
 | `whs_screen` (reader) | App mode: the last returned page, without a server call. Form mode: first collect an outstanding single-step result/error for this worker; otherwise read the form. |
 | `whs_log` (reader) | The worker's readable step log, newest last (`lines`, default 60): what was set and pressed, and the page that came back. |
 | `whs_submit` | Fill enabled fields and press one button; returns the next page. Read-only or unknown fields are refused before anything is sent. |
-| `whs_logoff` | Cancel/Back/Leave to the main menu and log off. |
+| `whs_logoff` | Cancel/Back/Leave to the main menu and log off. `retry_later`: the logoff names are still being looked up; call again in a few seconds. |
 | `whs_run_scenario` | A list of steps (`values`, `press`, `expect`); one line per step, stops at the first mismatch. A run that outlasts the call (the Pond's 30 s) answers `status: running` with `steps_done`; the worker is busy until `whs_wait` collects it. |
 | `whs_wait` | The result of a running `whs_run_scenario` (or `running` again); each result is collected once (calls waiting for the same run at the same moment all get it; a newer run is never touched). While `whs_login`/`whs_submit`/`whs_logoff` runs for a worker, a scenario for it is refused as `busy`. |
 
@@ -65,6 +65,72 @@ Scenario admission checks the complete list before contacting either backend: va
 maps, scalar field values, text press/note/expectation entries and all supported keys. Malformed
 later steps and unknown variables are refused before earlier steps can act. Backend-dependent
 availability and application responses remain runtime checks and are reported in the transcript.
+
+## How logoff finds its button
+
+`whs_logoff` first learns the menu item names and titles whose activity is
+`LogOff` from the standard `WarehouseMobileDeviceMenuItemsV4` OData entity.
+A read-only GET selects `MenuItemName,Title`, with a qualified
+`WHSWorkActivity'LogOff'` enum filter and a cross-company `dataAreaId`
+filter for the worker's company. Names and labels match exactly, ignoring
+case and surrounding whitespace; translated or custom titles such as
+`QUIT SESSION` need no English translation.
+
+App mode reuses its configured Entra app and secret, requesting an OData token
+for the environment URL. Its mapped D365 user must be allowed to read the
+entity. Form mode reads through `fetch` in the worker's signed-in page with
+same-origin credentials and no new credentials. It uses the page URL's `cmp`
+company, falling back to the configured form company. If neither is known,
+discovery reports that failure and uses the fallback.
+
+After a successful `whs_login`, both modes start discovery in the background
+for that company; the login answer does not wait for it. If that lookup is
+pending or failed, logoff starts at most one fresh lookup and uses the first
+good answer. It does not wait for the other request after a good answer.
+Form mode starts asynchronous page fetches and polls their results on its
+one browser executor; a pending fetch does not occupy that queue.
+
+Successful and empty replies stay cached for the backend's lifetime. A failed
+login lookup does not fail login or impose a cooldown on logoff. If both
+lookups fail, the 60-second cooldown starts when logoff's own lookup fails;
+there is no retry loop. Restart the service after changing menu-item
+definitions. Both modes allow a lookup 120 seconds independently of `step_timeout`,
+256 KiB and 128 rows; a cut or paged reply is unavailable, with no partial
+names accepted. Every lookup writes its source (`login` or `logoff`),
+duration in milliseconds and the names/titles found or the error to the
+worker's step log (`whs_log`), including background completion.
+Request URLs, response bodies and tokens are omitted.
+
+Logoff waits at most 8 seconds for the names. If no lookup has answered by
+then (typically right after a D365 start, when the first OData call is slow),
+`whs_logoff` answers the refusal `retry_later`: nothing was pressed, the
+session and page stay as they were, and the lookup goes on in the background.
+Call `whs_logoff` again a few seconds later; it uses the cached answer. A
+failed lookup is not a `retry_later`: logoff then uses the configured and
+English names below.
+
+Optional top-level `logoff_buttons` in `d365whsapp.json` adds known button
+names or labels in either mode. It defaults to an empty list and can help
+where the entity cannot be read:
+
+```json
+"logoff_buttons": ["QUIT SESSION"]
+```
+
+An information page with no input and a single button labelled OK or Close (About: OK)
+is left by that button when nothing else matches; any other lone button (a submenu's single entry,
+Continue, a custom flow's Confirm or Post) is never pressed by logoff: it answers `stuck`.
+
+Discovered and configured names take precedence. English Log off, Cancel,
+Leave…, Done and Back remain the fallback, with Leave before Back for
+the custom receiving flow's confirmation page. A `stuck` answer lists the activity
+names found, lookup outcome, configured names, English labels tried and
+buttons present on the page. It does not mean the server session ended;
+the next login may resume it.
+
+The discovery and page-side fetch have fake coverage. Real D365 acceptance
+of the enum filter and signed-in page fetch remains required before treating
+this path as live-verified.
 
 ## Waiting for a result
 
@@ -118,6 +184,18 @@ App mode calls `WHSMobileAppServices/WHSMobileAppService/getNextFormHandHeld`.
   the session token, d365whsapp logs in again and the server resumes at its last
   processed page; the result says `recovered: true`. Check that page: the step
   may or may not have run. d365whsapp never resends a step blindly.
+- **Another device.** When D365 answers `MULTI_DEVICE_USER_LOGIN` (a handheld or
+  another host logged the worker in), the step fails with `session_taken` and
+  the local session ends; nothing logs in again on its own.
+- **One step at a time per worker.** A second login, submit or logoff for a
+  worker while one is in progress is refused as `busy`: it would act on a page
+  its caller has not seen. `whs_screen` shows the page the first one left.
+- **Form login outcome unknown.** When something goes wrong after the form's
+  Login was pressed (an infolog box, a lost browser answer), `whs_login` fails
+  with `login_outcome_unknown`: check with `whs_screen` before typing the
+  password again. A login that fails before the press leaves no tab behind.
+- **Logoff never repeats itself.** A button that did not leave its page is not
+  pressed a second time: logoff answers `stuck` and the session stays there.
 - **Purchase orders** must be Approved or Confirmed to be received (or "In
   external review" with the warehouse parameter that allows it).
 
@@ -238,6 +316,24 @@ those defaults when there is none (address suggested from the box's `web.config`
 opens Edge with the profile; by hand, [d365web's setup procedure](D365WEB.md#setup). When `profiles_dir` is set, it replaces the complete profile path;
 give each service a different directory. App keys (`aos_url`, `tenant`, ...)
 may stay in the file; only `mode` decides.
+The usual browser sign-in is the developer's D365 user. A separate D365 test
+user is optional, per box. To use one, close the form backend's browser and
+stop that backend before changing its `form` configuration. Choose a distinct
+`form.profile` (for example `d365whsapp-test`) and unused `form.debug_port`;
+if `profiles_dir` is configured, change that complete directory instead.
+Run `browser-signin.cmd d365whsapp` as the same Windows account that runs
+the service, select the intended D365 test account in Edge, wait for the
+environment/company, and close Edge. Restart through setup with the complete
+installed selection. The helper reads an existing file without rewriting it.
+
+This does not create a D365 user or grant a role. Tenant sign-in policy and
+the user's D365 permissions must allow the scenario. The warehouse worker
+passed to `whs_login` remains a separate identity from this browser sign-in.
+The developer's sign-in is still supported; no separate Windows account is
+required by this option.
+
+Form pages report the same `browser_mode_mismatch` or `browser_mode_unknown`
+as d365web when an existing Edge's headless mode differs or cannot be checked.
 
 - One tab per worker, next to an untouched main tab. One browser means one
   step at a time: calls queue, workers take turns step by step.
@@ -246,14 +342,18 @@ may stay in the file; only `mode` decides.
   after the step has its steps checked), and `message_kind` (the form paints info and error alike).
 - A page comes back as `page` (Login, Menu or `work`), `title`, `message` (`text` only), `buttons`,
   `fields`, `readonly`, `labels`. `resumed` is true when the login lands on a work page (D365 resumed
-  the worker's session); `recovered` does not occur.
+  the worker's session); `recovered` does not occur. `whs_login` for a worker whose form tab still
+  holds a session (not at Login) resumes it where it is, as app mode does: nothing is typed or
+  pressed (with an explicit `company`, the form is opened in that company and logged in afresh).
 - A single step that outlasts the call answers `step_running`. Call `whs_screen` for that worker to
   collect the original result or error; while it is outstanding, other actions answer `busy` and
   cannot consume it. After collection, `whs_screen` reads the current form again. An error may leave
   the operation's outcome unknown: inspect the page before deciding what to do; it is not retried.
   Scenario steps wait in the run's own thread (up to the form block's `step_timeout`).
 - Submit and login stop before pressing if field setting stops, readback is unavailable, or a value
-  differs under the browser client's existing comparison rules. `set_incomplete` carries the applied
+  differs under the browser client's existing comparison rules. Secret fields (Password, PIN) are the
+  exception: D365 keeps a typed password outside its input, so it cannot be read back; the page after
+  pressing decides (a Login page again answers `login_failed`). `set_incomplete` carries the applied
   values, any `stopped_at`/new messages and the form page; secret field values are masked.
 - The step log is written as in app mode; form pages are marked `(form)`.
 

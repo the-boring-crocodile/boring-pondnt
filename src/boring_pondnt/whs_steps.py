@@ -126,13 +126,26 @@ def check(view: View, expect: dict[str, Any]) -> tuple[list[str], list[str]]:
     return misses, unseen
 
 
-def exit_button(buttons: list[tuple[str, str]]) -> str | None:
-    """The button that leads out, by name or label: Log off, else Cancel (also process-guide
+LOGOFF_STEPS_MAX = 12  # presses on the way out to the login page, in both modes
+ACKNOWLEDGE = frozenset({"ok", "close"})  # an information page's only button, by name or label
+
+
+def exit_button(buttons: list[tuple[str, str]], logoff_names: tuple[str, ...] = (),
+                acknowledge: bool = False) -> str | None:
+    """Prefer the discovered/configured logoff names; otherwise the English exit order.
+    The button that leads out, by name or label: Log off, else Cancel (also process-guide
     CancelExitProcess / CancelResetProcess, labelled Cancel), else a "Leave ..." button (Verified
     Inbound's Leave document, the only way out of its scan pages, and the confirming button of its
     "Leave anyway?" page), else Done (a custom flow's S11 after a receipt: the receipt is already
     registered, Done only returns to S1), else Back. Leave before Back: on that confirmation page Back returns to the
-    document (logoff went round in circles there, 2026-10-23)."""
+    document (logoff went round in circles there, 2026-10-23). With `acknowledge` (the page has no
+    input), the only button of an information page such as About is the way out when nothing matched,
+    and only when it is labelled OK or Close: a lone menu entry, Continue or a custom "Confirm"/"Post"
+    acts, it does not leave."""
+    known = {name.strip().casefold() for name in logoff_names}
+    for name, label in buttons:
+        if known.intersection((name.strip().casefold(), label.strip().casefold())):
+            return name
     plain = [(name, name.strip().lower(), label.strip().lower()) for name, label in buttons]
     for wanted in ("log off", "cancel"):
         for name, low, label in plain:
@@ -147,4 +160,9 @@ def exit_button(buttons: list[tuple[str, str]]) -> str | None:
     for name, low, label in plain:  # a custom flow's last page offers only Done (2026-10-27)
         if label == "done" or low.endswith("done"):
             return name
-    return next((name for name, low, label in plain if "back" in (low, label)), None)
+    back = next((name for name, low, label in plain if "back" in (low, label)), None)
+    if back is None and acknowledge and len(buttons) == 1 and ACKNOWLEDGE.intersection(plain[0][1:]):
+        # An information page (About: version, user, AOS) with no input and one button, OK: the
+        # button only acknowledges it and returns to the menu (live, 2026-11-06: logoff was stuck).
+        return buttons[0][0]
+    return back

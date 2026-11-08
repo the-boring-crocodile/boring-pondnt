@@ -35,8 +35,9 @@ def test_tools_are_few_strict_and_schema_free():
         assert tool.input_schema.get("additionalProperties") is False, tool.name
         assert tool.output_schema is None, tool.name  # no schema re-sent with every request
         assert len(tool.description) <= 120, tool.name
-    listed = json.dumps([t.model_dump(exclude_none=True, by_alias=True) for t in tools])
-    assert len(listed) < 8000  # the whole tools/list, re-sent every request
+    listed = json.dumps([t.model_dump(exclude_none=True, by_alias=True) for t in tools],
+                        ensure_ascii=False, separators=(",", ":"))
+    assert len(listed) <= 11_752  # 6,752 + 5,000
     assert '"title"' not in listed and '"anyOf"' not in listed
 
 

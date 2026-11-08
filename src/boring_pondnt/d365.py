@@ -73,8 +73,9 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
 
 
 def ps_quote(value: str) -> str:
-    """A PowerShell single-quoted string."""
-    return "'" + value.replace("'", "''") + "'"
+    """A PowerShell single-quoted string. PowerShell also ends one at the typographic quotes
+    U+2018-U+201B: each is doubled like the ASCII one."""
+    return "'" + re.sub("(['\u2018\u2019\u201a\u201b])", r"\1\1", value) + "'"
 
 
 def checked_name(kind: str, value: str) -> str:

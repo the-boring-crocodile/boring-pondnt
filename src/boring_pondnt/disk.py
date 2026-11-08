@@ -1,6 +1,6 @@
 """The disk layer: absolute paths, bounded reads, in-place edits and exclusive creation.
 
-Deliberately plain: no roots, no sandbox. This layer does not
+Deliberately plain: no roots, no sandbox, only no special paths (absolute). This layer does not
 travel to the Pond; the Pond's own disk layer is stricter for good
 reasons. Format logic lives in `textfiles`; Windows specifics stay here,
 recognised by their error codes, so the module also runs on Linux.
@@ -11,6 +11,7 @@ from __future__ import annotations
 import errno
 import hashlib
 import os
+import re
 import stat
 import tempfile
 import shutil
@@ -35,7 +36,25 @@ def is_lock_error(exc: OSError) -> bool:
     return getattr(exc, "winerror", None) in WINDOWS_LOCK_ERRORS or exc.errno == errno.EBUSY
 
 
+_DRIVE = re.compile(r"^[A-Za-z]:[\\/]")
+_DEVICE_NAME = re.compile(r"^(con|prn|aux|nul|com[0-9]|lpt[0-9]|conin\$|conout\$) *(\.[^\\/]*)?$", re.IGNORECASE)
+
+
 def absolute(path: str) -> Path:
+    """An absolute path to a plain file or folder. Special paths are refused (Wald, 2026-11-07): a
+    network share (a UNC path: Windows would send the account's NTLM hash to that host), a device path
+    (the "?" and "." prefixes: shadow copies, pipes), an alternate data stream (file:stream) and the
+    device names (CON, NUL, COM1, ...), which block or read something that is not a file."""
+    text = str(path)
+    if text.startswith(("\\\\", "//", "\\??\\")):
+        raise Refused("invalid_request", "network shares and device paths are not supported; give a local path",
+                      path=path)
+    if _DRIVE.match(text):
+        if ":" in text[2:]:
+            raise Refused("invalid_request", "alternate data streams (':' after the drive) are not supported",
+                          path=path)
+        if any(_DEVICE_NAME.match(part.rstrip(" .")) for part in re.split(r"[\\/]", text[3:]) if part):
+            raise Refused("invalid_request", "device names (CON, NUL, COM1, ...) are not files", path=path)
     p = Path(path)
     if not p.is_absolute():
         raise Refused("invalid_request", "path must be absolute", path=path)
@@ -64,6 +83,42 @@ def read_version(p: Path, limit: int, hint: str = "") -> tuple[bytes, Version]:
     """Read a whole file of at most `limit` bytes with the identity of the handle read, or refuse."""
     data, info = _read(p, limit, hint, identify=True)
     return data, Version(info.st_dev, info.st_ino, len(data), sha256_bytes(data))
+
+
+READ_BLOCK = 1024 * 1024
+
+
+def read_range(p: Path, limit: int, offset: int, length: int) -> tuple[bytes, int, str]:
+    """`length` bytes from `offset` with the whole file's size and sha256, from one streaming pass.
+
+    For ranged reads of large files: one block and the range are held, not the file, and the hash
+    describes the same bytes the range was cut from. Refuses like `read_bytes`."""
+    try:
+        size = p.stat().st_size
+        if p.is_dir():
+            raise Refused("invalid_request", "path is a directory", path=str(p))
+        if size > limit:
+            raise Refused("limit", f"file exceeds {limit} bytes", path=str(p), size=size)
+        digest = hashlib.sha256()
+        chunk = bytearray()
+        position = 0
+        with p.open("rb") as handle:
+            # never more than limit + 1 bytes in all, as `_read`: a file growing past the stat is refused
+            while block := handle.read(min(READ_BLOCK, limit + 1 - position)):
+                digest.update(block)
+                start, end = max(offset - position, 0), min(offset + length - position, len(block))
+                if start < end:
+                    chunk += block[start:end]
+                position += len(block)
+                if position > limit:
+                    raise Refused("limit", f"file exceeds {limit} bytes", path=str(p))
+        return bytes(chunk), position, digest.hexdigest()
+    except FileNotFoundError:
+        raise Refused("not_found", "file does not exist", path=str(p)) from None
+    except PermissionError as exc:
+        if is_lock_error(exc):
+            raise Refused("locked", "file is locked by another process", path=str(p)) from None
+        raise Refused("forbidden", "file is not accessible", path=str(p)) from None
 
 
 def _read(p: Path, limit: int, hint: str, identify: bool):

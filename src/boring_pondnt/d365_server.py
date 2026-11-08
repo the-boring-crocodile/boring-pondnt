@@ -36,6 +36,10 @@ from boring_service_kit.outcomes import Outcome
 from .d365_tools import (INSTRUCTIONS, redact, register_tools as register_d365_tools)
 
 
+# Each server its own name: support bundles collect several state folders flat.
+CALL_LOG = "calls-d365.jsonl"
+
+
 def create_server(powershell: str = "powershell.exe", state_dir: Path | None = None, log_calls: bool = False,
                   token_verifier: Any = None, auth: Any = None, on_discover: Any = None,
                   start_session: bool = True, sql_server: str = "localhost",
@@ -79,7 +83,7 @@ def create_server(powershell: str = "powershell.exe", state_dir: Path | None = N
                     token_verifier=token_verifier, auth=auth, auth_server_provider=auth_server_provider,
                     lifespan=lifespan)
     attach_heartbeat(mcp, on_discover)
-    log = CallLog(state / "calls-d365.jsonl" if log_calls else None)
+    log = CallLog(state / CALL_LOG if log_calls else None)
 
     def guard(fn: Any, role: str) -> Any:
         return permitted(fn, role) if enforce_access else fn
@@ -98,7 +102,7 @@ def create_server(powershell: str = "powershell.exe", state_dir: Path | None = N
             return fn
         return register
 
-    register_d365_tools(tool, session, jobs, state, sql_connect, call_budget)
+    register_d365_tools(tool, session, jobs, state, sql_connect, call_budget, guard)
 
     # Lazy connector: discovery and PowerShell never need the reference database.
     # MCP 2.2 dispatches sync functions on worker threads. Session owns its PS lock;

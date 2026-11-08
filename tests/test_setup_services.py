@@ -211,6 +211,111 @@ def test_d365web_is_opt_in_and_needs_its_config(tmp_path):
     assert item["url"] == "http://127.0.0.1:18516/mcp"
 
 
+
+def test_d365data_is_opt_in_and_installs_with_its_config(tmp_path):
+    from boring_pondnt.setup_services import DEFAULT_ONLY
+    assert "d365data" not in DEFAULT_ONLY.split(",")
+    assert "boring-d365data" not in entries(run({}, tmp_path, only=DEFAULT_ONLY.split(",")))
+    result = run({}, tmp_path, only=["d365data"], apply=False)
+    assert not result["services"] and "no d365data.json" in result["conflicts"][0]
+    folder = tmp_path / "services" / "d365data"
+    folder.mkdir(parents=True)
+    (folder / "d365data.json").write_text("{}")
+    result = run({}, tmp_path, only=["d365data"])
+    (item,) = result["services"]
+    assert item["module"] == "boring_pondnt.d365data_server"
+    assert item["account"] == "user" and item["python"].endswith("pythonw.exe")
+    assert item["arguments"] == ["serve", "--config", str(folder / "config.json"),
+                                "--d365data", str(folder / "d365data.json")]
+    assert item["url"] == "http://127.0.0.1:18518/mcp"
+    config = ServiceConfig(folder / "config.json")
+    assert config.port == 18518 and config.call_limit is None
+    assert SERVICES["d365data"].port == 18518
+    answer = uninstall(entries(result), str(tmp_path), "C:/tools/rel")
+    assert answer["removals"] == ["boring-d365data"]
+    assert answer["tasks"] == ["pondNT boring-d365data"]
+    assert answer["folders"] == [str(folder)]
+    assert answer["services"][0]["arguments"] == item["arguments"]
+    assert (folder / "d365data.json").is_file()
+
+
+def test_d365data_setup_arguments_reach_the_server_main(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from boring_pondnt import d365data_server
+    folder = tmp_path / "services" / "d365data"
+    folder.mkdir(parents=True)
+    (folder / "d365data.json").write_text(json.dumps({
+        "aos_url": "https://aos.example", "tenant": "tenant.example",
+        "client_id": "example-app", "secret_file": "example.dpapi"}))
+    (item,) = run({}, tmp_path, only=["d365data"], apply=False)["services"]
+    seen = []
+    def config(path):
+        seen.append(str(path))
+        return SimpleNamespace(serve=lambda factory: seen.append(callable(factory)))
+    monkeypatch.setattr(d365data_server, "ServiceConfig", config)
+    d365data_server.main(item["arguments"])
+    assert seen == [str(folder / "config.json"), True]
+
+
+def test_d365data_ferry_guide_and_uninstall_reuse_existing_paths(tmp_path):
+    import pytest
+    from pathlib import Path
+    from boring_pondnt.setup_services import choose_gated
+    ferry = pytest.importorskip("boring_mcp_ferry.config")
+    folder = tmp_path / "services" / "d365data"
+    folder.mkdir(parents=True)
+    (folder / "d365data.json").write_text("{}")
+    handbook = tmp_path / "handbook"
+    handbook.mkdir()
+    guide = (Path(__file__).resolve().parents[1] / "handbook" / "data.md").read_text(encoding="utf-8")
+    (handbook / "data.md").write_text(guide, encoding="utf-8")
+    assert choose_gated("all", ["d365data"], str(tmp_path)) == (["d365data"], ["d365data"])
+    result, published = gated_run({}, tmp_path, gated=["d365data"], only=["d365data"])
+    assert set(published) == {"boring-gateway"}
+    assert result["gateway"]["carries"] == ["boring-d365data"]
+    backend = ferry.read(tmp_path / "services" / "gateway" / "ferry.json").backends[0]
+    assert backend.name == "d365data" and backend.url == "http://127.0.0.1:18518/mcp"
+    assert backend.guide == guide and backend.headers == header(tmp_path, "d365data")
+    answer = uninstall(published, str(tmp_path), "C:/tools/rel")
+    assert set(answer["tasks"]) == {"pondNT boring-d365data", "pondNT boring-gateway"}
+    assert {s["name"] for s in answer["services"]} == {"boring-d365data", "boring-gateway"}
+    only, gated = choose_gated("none", [], str(tmp_path))
+    assert only == ["d365data"] and not gated
+    _, direct = gated_run(published, tmp_path, gated=gated, only=only)
+    assert set(direct) == {"boring-d365data"}
+    assert not (tmp_path / "services" / "gateway" / "d365data.headers.json").exists()
+
+
+def test_ferry_uses_release_guide_until_owner_adds_one(tmp_path):
+    from pathlib import Path
+    from pytest import importorskip
+
+    ferry = importorskip("boring_mcp_ferry.config")
+    root = tmp_path / "release"
+    state = tmp_path / "state"
+    release_guide = root / "handbook" / "data.md"
+    release_guide.parent.mkdir(parents=True)
+    release_guide.write_text("# Release data guide\n", encoding="utf-8")
+    local_guide = state / "handbook" / "data.md"
+    local_guide.parent.mkdir(parents=True)
+    config = state / "services" / "d365data" / "d365data.json"
+    config.parent.mkdir(parents=True)
+    config.write_text("{}")
+    ferry_path = state / "services" / "gateway" / "ferry.json"
+
+    def configured_guide():
+        plan({}, str(root), str(state), "", ["d365data"], "Robin", "DEVBOX",
+             apply=True, now=NOW, gated=["d365data"])
+        backend = json.loads(ferry_path.read_text())["backends"]["d365data"]
+        return Path(backend["guide_file"]), ferry.read(ferry_path).backends[0].guide
+
+    assert configured_guide() == (release_guide, "# Release data guide\n")
+    assert not local_guide.exists()
+    local_guide.write_text("# Owner data guide\n", encoding="utf-8")
+    assert configured_guide() == (local_guide, "# Owner data guide\n")
+    assert local_guide.read_text(encoding="utf-8") == "# Owner data guide\n"
+
+
 # ---------------------------------------------------------------- the gateway (D41)
 
 GATED = ["sourcecache", "canvas", "d365"]
@@ -370,3 +475,107 @@ def test_the_gateway_is_never_chosen_with_only(tmp_path, monkeypatch, capsys):
     assert {s["name"] for s in answer["services"] if s["behind"]} == {"boring-sourcecache", "boring-canvas",
                                                                       "boring-d365"}
     assert not list(tmp_path.iterdir())
+
+
+def test_finalize_without_a_key_file_refuses_cleanly(tmp_path, monkeypatch, capsys):
+    import io
+    import pytest
+    from boring_pondnt import setup_services
+    published = entries(run({}, tmp_path, only=["canvas"]))
+    (tmp_path / "services" / "canvas" / "keys.json").unlink()
+    with pytest.raises(ValueError, match="keys.json is missing; cleanup refused"):
+        finalize(published, str(tmp_path), "Robin", "DEVBOX")
+    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(published)))
+    with pytest.raises(SystemExit) as stopped:
+        setup_services.main(["--root", "C:/r", "--state", str(tmp_path), "--finalize"])
+    assert stopped.value.code == 2
+    err = capsys.readouterr().err
+    assert "keys.json is missing" in err and "Traceback" not in err
+
+
+def test_finalize_and_uninstall_report_a_corrupt_gateway_cleanly(tmp_path, monkeypatch, capsys):
+    import io
+    import pytest
+    from boring_pondnt import setup_services
+    folder = tmp_path / "services" / "gateway"
+    folder.mkdir(parents=True)
+    for text in ('{"backends": []}', "not json"):
+        (folder / "ferry.json").write_text(text)
+        for mode in ("--finalize", "--uninstall", "--plan"):
+            monkeypatch.setattr("sys.stdin", io.StringIO("{}"))
+            with pytest.raises(SystemExit) as stopped:
+                setup_services.main(["--root", "C:/r", "--state", str(tmp_path), mode])
+            assert stopped.value.code == 2
+            assert "Invalid installed gateway configuration" in capsys.readouterr().err
+
+
+def test_a_handbook_that_appears_meanwhile_is_kept_and_no_staging_is_left(tmp_path, monkeypatch):
+    import os
+    from pathlib import Path
+    from boring_pondnt import setup_services
+    release = tmp_path / "rel"
+    (release / "handbook").mkdir(parents=True)
+    (release / "handbook" / "bootstrap.md").write_text("# release\n")
+    state = tmp_path / "state"
+
+    def raced(src, dst):
+        os.makedirs(dst)
+        (Path(dst) / "bootstrap.md").write_text("# theirs\n")
+        raise FileExistsError(dst)
+
+    monkeypatch.setattr(setup_services.os, "rename", raced)
+    setup_services.seed_kit(str(release), str(state))
+    assert sorted(p.name for p in state.iterdir()) == ["handbook"]
+    assert (state / "handbook" / "bootstrap.md").read_text() == "# theirs\n"
+
+
+def test_a_failed_handbook_rename_without_a_rival_still_fails(tmp_path, monkeypatch):
+    import pytest
+    from boring_pondnt import setup_services
+    release = tmp_path / "rel"
+    (release / "handbook").mkdir(parents=True)
+    (release / "handbook" / "bootstrap.md").write_text("# release\n")
+    state = tmp_path / "state"
+
+    def denied(src, dst):
+        raise PermissionError(dst)
+
+    monkeypatch.setattr(setup_services.os, "rename", denied)
+    with pytest.raises(PermissionError):
+        setup_services.seed_kit(str(release), str(state))
+    assert not list(state.iterdir())  # the staging copy went too
+
+
+def test_an_installed_gateway_is_left_when_nothing_it_should_carry_can_be_set_up(tmp_path):
+    _, published = gated_run({}, tmp_path)
+    ferry = (tmp_path / "services" / "gateway" / "ferry.json").read_bytes()
+    result = plan(published, "C:/tools/rel", str(tmp_path), "", ["sourcecache"], "Robin", "DEVBOX",
+                  apply=True, now=NOW, gated=["sourcecache"])
+    assert any(c.startswith("boring-sourcecache: no source index") for c in result["conflicts"])
+    assert any("left as it is, neither rewritten nor retired" in c for c in result["conflicts"])
+    assert not result["services"] and not result["removals"] and not result["retire"]
+    assert "gateway" not in result
+    assert (tmp_path / "services" / "gateway" / "ferry.json").read_bytes() == ferry
+    finalize(published, str(tmp_path), "Robin", "DEVBOX")  # the headers it carries survive
+    assert header(tmp_path, "sourcecache")["Authorization"].startswith("Bearer ")
+
+
+def test_without_an_installed_gateway_nothing_to_carry_is_not_configured(tmp_path):
+    result = plan({}, "C:/tools/rel", str(tmp_path), "", ["sourcecache"], "Robin", "DEVBOX",
+                  apply=False, now=NOW, gated=["sourcecache"])
+    assert "boring-gateway: nothing to carry; not configured" in result["conflicts"]
+
+
+def test_paths_with_a_percent_are_refused(tmp_path, monkeypatch, capsys):
+    import io
+    import pytest
+    from boring_pondnt import setup_services
+    for extra in (["--root", "C:/%TEMP%/rel"], ["--root", "C:/r", "--index", "G:/%x%.db"]):
+        monkeypatch.setattr("sys.stdin", io.StringIO("{}"))
+        with pytest.raises(SystemExit):
+            setup_services.main(extra + ["--state", str(tmp_path), "--plan"])
+        assert "contains '%'" in capsys.readouterr().err
+    monkeypatch.setattr("sys.stdin", io.StringIO("{}"))
+    with pytest.raises(SystemExit):
+        setup_services.main(["--root", "C:/r", "--state", str(tmp_path / "50%"), "--plan"])
+    assert "contains '%'" in capsys.readouterr().err
