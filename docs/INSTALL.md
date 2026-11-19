@@ -9,8 +9,7 @@ independent general services, and optional browser, warehouse and data tools on 
 Dynamics 365 F&O development box. This page takes a box from download to a
 working connection. The recommended layout keeps core and Knowledge direct
 and puts the other selected services behind Ferry.
-Windows gets one scheduled task per server under `\pondNT\` and locked-down
-permissions on the release folder itself, and nothing else: no Windows
+Windows gets one scheduled task per server under `\pondNT\`: no Windows
 service, no registry change, no PATH change. `.\setup.ps1 -Uninstall`
 removes the tasks again (step 9).
 
@@ -32,7 +31,7 @@ zip and inside it.
 
 ## Before you start
 
-- **Local administrator.** Setup registers elevated and SYSTEM tasks and may
+- **Local administrator.** Setup registers person/logon tasks and may
   change Defender. Run it in PowerShell opened with *Run as administrator*.
   Copilot's commands then run elevated, as you.
 - **Visual Studio 2022 17.14 or later** with GitHub Copilot. MCP tools work
@@ -68,28 +67,27 @@ zip and inside it.
 After downloading and unpacking (step 1), in an elevated PowerShell window in the unpacked
 folder, look first:
 
-    powershell -ExecutionPolicy Bypass -File .\setup.ps1 -WhatIf -Gateway all
+    powershell -ExecutionPolicy Bypass -File .\setup.ps1 -WhatIf -Index J:\pondnt\d365.db
 
-It looks at the box (PackagesLocalDirectory, an existing index,
-d365fo.tools, the cross-reference database, Defender) and prints a plan. It
-changes nothing, skips the live self-check probes and reports readiness as
-unverified; it does not need elevation. Then apply, in the elevated window:
+Build the index separately (step 5), then pass its existing path with
+`-Index`. Setup checks bundled modules, selected configs/ports, index
+readability and task conflicts; it does not probe shells, jobs, long paths,
+d365fo.tools or SQL. Preview changes nothing and needs no elevation.
+Then apply in the elevated window:
 
-    powershell -ExecutionPolicy Bypass -File .\setup.ps1 -Gateway all
+    powershell -ExecutionPolicy Bypass -File .\setup.ps1 -Index J:\pondnt\d365.db
 
-It asks before each change (`-Yes` answers yes to all but Defender):
+It asks before each change; `-Yes` approves every question, including Defender.
+Adding an exclusion still requires `-AddDefenderExclusion`:
 
-- builds the source index if none exists (`-Locales en-US,de`, `-Name`,
-  `-Index` to choose; 10-35 minutes with the Defender exclusion, depending on
-  the disk; many times longer without it);
 - sets up the five default services on 127.0.0.1, each with its own access
   key and scheduled task (`-Services` chooses services, `-SkipServices`
   skips them);
-- with the recommended `-Gateway all`, adds Ferry and publishes three client
-  entries: `boring-pondnt`, `boring-knowledge` and `boring-gateway`. The
-  gateway offers `service_list`, `service_describe`, `service_read` and
-  `service_call`; Sourcecache, Canvas and D365 are behind it. Browser/WHS
-  and data join them when selected. Backend tasks, ports and keys remain separate;
+- with the default selection, publishes `boring-pondnt`, `boring-knowledge`
+  and `boring-gateway`. A custom selection publishes direct entries for the
+  selected core and Knowledge servers, and adds Ferry when a specialist is
+  selected. Ferry offers `service_list`, `service_describe`, `service_read` and
+  `service_call`. Each specialist keeps its own task, port and key;
 - updates `%USERPROFILE%\.mcp.json` only when its entries or credentials
   need to change, with a backup first. Customized entries are retained and
   reported for review; unrelated entries stay in place.
@@ -103,35 +101,16 @@ tokens, even for tools never called. On-demand discovery can reduce this
 up-front context and token cost; the actual saving depends on the client,
 caching and task. Ferry adds discovery calls of its own.
 [Gateway benefits and trade-offs](https://github.com/the-boring-crocodile/boring-services/blob/main/mcp-ferry/README.md#gateways-optional)
-explains the choice. Direct entries remain available if they suit your client better.
+explains the trade-offs. Standard setup uses this fixed layout.
 
-`-Gateway all` means all services in this run's selection except core and
-Knowledge. On an existing installation, pass the complete intended
-`-Services` list, including browser/WHS/data opt-ins you want to keep behind Ferry.
-For an installation using all eight services, that selection is
-`-Services 'sourcecache,knowledge,canvas,core,d365,d365web,d365whsapp,d365data'`.
-Prepare each selected opt-in first. For d365data, put d365data.json in
-`%LOCALAPPDATA%\boring-pondnt\services\d365data\d365data.json`; setup refuses
-it while that file is missing. [D365DATA.md](D365DATA.md#install) describes
-its dedicated app/user, DPAPI secret and the operator-created private package
-folder. Setup does not create `C:\ProgramData\d365data\packages`.
-Retain the correct index path and existing browser environment/company
-configuration; review the preview before applying. These commands use the
-scheduled-task installer. An existing manual launcher needs its own reviewed
-configuration change rather than a change to Windows startup policy.
+The gateway layout is fixed: core and Knowledge are direct; every other installed
+service is behind Ferry. Setup generates ferry.json from its service plan and the
+effective URLs, referencing each backend's own client.headers.json. Browser,
+warehouse and data remain opt-in: prepare their settings, then add the service
+with -Services. Existing owned tasks remain in the scope automatically.
+There is no operator gateway roster.
 
-Alternatives: `-Gateway d365,canvas` carries only those selected services;
-`-Gateway none` restores direct client entries and retires the gateway.
-Omitting the flag uses `keep`, preserving existing routing. The recommendation
-is explicit in the commands above; the installer does not silently convert
-an existing setup. When none of the services chosen for the gateway can be set
-up (each reports its conflict), an installed gateway is left as it is, neither
-rewritten nor retired, and the plan says so; resolve the conflicts or use
-`-Gateway none`.
-
-The release folder, `%LOCALAPPDATA%` and the index path must not contain `%`:
-the SYSTEM tasks start through `cmd.exe`, which expands `%NAME%` even inside
-quotes, so setup refuses such paths before changing anything.
+Task actions invoke pythonw directly; `%` in a path is passed literally.
 
 Without elevation it stops with "Run this in PowerShell as Administrator."
 It never touches Defender unless you agree or add `-AddDefenderExclusion`
@@ -144,23 +123,24 @@ The steps below are what it does, by hand.
 Releases are on
 [GitHub](https://github.com/the-boring-crocodile/boring-pondnt/releases);
 candidates are marked as pre-releases. Each has the zip and a `.sha256` file.
-One block, from the download to the unpacked folder, in PowerShell (as your
-own user; `curl.exe` comes with Windows). `$v` is the version in the file
-name and `$tag` the release's tag: `0.2.10` and `v0.2.10` in this stable example; a
-candidate writes them differently, for example `0.2.11rc1` and `v0.2.11-rc.1` (Python's
-spelling in the file name). That candidate would unpack into `C:\tools\pondnt-0.2.11-rc1`;
-the published build drops the rc from its version.
+Run the download and unpack block in an elevated PowerShell window for your
+own account; writing under Program Files needs that elevation. `curl.exe`
+comes with Windows. This block downloads pondNT 0.3.0. Read the
+[0.3.0 release page](https://github.com/the-boring-crocodile/boring-pondnt/releases/tag/v0.3.0).
+After unpacking, read **Upgrading** in `CHANGELOG.md` beside `setup.ps1` in the ZIP.
 
-    $v = '0.2.10'; $tag = "v$v"
+    $v = '0.3.0'; $tag = 'v0.3.0'
     $f = "boring-pondnt-$v-win-x64.zip"
     $u = "https://github.com/the-boring-crocodile/boring-pondnt/releases/download/$tag"
     cd "$env:USERPROFILE\Downloads"
     curl.exe -fLO "$u/$f"; curl.exe -fLO "$u/$f.sha256"
     if ((Get-FileHash $f -Algorithm SHA256).Hash -eq (Get-Content "$f.sha256").Split(' ')[0]) {
         Unblock-File $f
-        Expand-Archive $f C:\tools
+        Expand-Archive $f "C:\Program Files\pondNT" -ErrorAction Stop
         $folder = if ($v -match '^(\d+\.\d+\.\d+)rc(\d+)$') { "pondnt-$($Matches[1])-rc$($Matches[2])" } else { "boring-pondnt-$v-win-x64" }
-        $p = "C:\tools\$folder"; "unpacked: $p"
+        $p = "C:\Program Files\pondNT\$folder"
+        if (-not (Test-Path -LiteralPath "$p\setup.ps1" -PathType Leaf)) { throw "Missing setup.ps1 under $p" }
+        "unpacked: $p"
     } else { Write-Error "checksum does not match: delete $f and download again" }
 
 It must end with `unpacked:` and the folder; read anything red above it. A
@@ -174,22 +154,16 @@ The zip holds one folder; `$p` is that folder, and every command below uses
 it. Everything runs from there: Python 3.14 and PowerShell 7 are inside,
 nothing else is needed.
 
-**Who may change that folder.** Its Python runs as SYSTEM (the general
-services) and elevated (the core and the D365 server), so whoever can add a
-file there can run code as SYSTEM: a `sitecustomize.py` dropped into its
-Python is enough. An unpacked folder inherits its parent's permissions,
-which can include broad create/write access; inspect the actual ACL rather
-than treating a path such as `C:\tools` as a security boundary. Setup therefore takes the
-release folder off inheritance before it starts any task (administrators and
-SYSTEM change it, Users read and run it) and checks every file below it; it
-asks first and touches nothing else. It runs the release's own code before
-that (the self-check, the plan, an index build): on a box where other people
-have accounts, lock the folder by hand right after unpacking, before setup; on the usual dev box, with only its
-administrator, there is no one to lock out. By hand, as Administrator:
+**Who may change that folder.** Install under `C:\Program Files\pondNT\<version>`
+with permissions controlled by the host administrator. Core and D365 tasks run
+elevated: anyone who can replace their Python or add a startup file there can
+execute code with that elevation.
 
-    icacls $p /inheritance:r /grant:r '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-545:(OI)(CI)RX'
-
-Afterwards only an elevated prompt can delete an old release folder.
+Setup inspects release owners and write grants read-only. It warns sternly
+about potential write access, reparse points and unreadable paths, then
+continues. It never changes ACLs or ownership, and makes no effective-access
+or parent-directory security guarantee. Review the host's permissions yourself;
+a warning is not a repair.
 
 ## 2. Defender (optional -- dangerous, read first)
 
@@ -222,8 +196,10 @@ Narrower alternative: exclude only the index file's folder
 (`Add-MpPreference -ExclusionPath J:\pondnt`) -- searching the index gets
 fast, building it and reading source files stay scanned.
 
-`pythonw.exe` is the core's interpreter (it runs without a window). Setup asks
-about both (default no; `-Yes` never answers it) and `-Uninstall` offers to remove them.
+`pythonw.exe` runs the logon tasks without a window. With
+`-AddDefenderExclusion`, setup asks about both interpreters (default no;
+`-Yes` accepts it). `-Uninstall` offers to remove this release's exclusions;
+`-Yes` accepts that removal too.
 
 Undo: `Remove-MpPreference -ExclusionProcess "$p\python\python.exe", "$p\python\pythonw.exe"` (and
 `-ExclusionPath` for the folder). The self-check (step 3) shows whether the
@@ -277,9 +253,25 @@ lists the options:
   `d365_sql`), `--xref-server`, `--xref-database` (default `DYNAMICSXREFDB`),
   `--xref-driver`, `--xref-stall-seconds`, `--state-dir` and `--no-call-log`.
 
-Setup writes each server's configuration to
-`%LOCALAPPDATA%\boring-pondnt\services\<server>\config.json` (loopback
-address, port, key file); its task starts the server with that file.
+Setup creates each selected server's configuration once at
+`%LOCALAPPDATA%\boring-pondnt\services\<server>\config.json`. After that the
+file belongs to the operator. Setup reads it without rewriting it, except for
+the one-time addition of `mode=keys` to the exact legacy local keys format. To change
+an MCP port, edit both `port` and the port in its loopback `url`, then rerun
+setup. Client entries, gateway upstream URLs and listener checks follow the
+file. A duplicate port or unreadable config stops preparation before changes,
+and the error names the file.
+
+Canvas serves MCP and browser routes on the one configured listener (18511 by
+default). Its resource URL ends in /mcp; removing that suffix gives the browser
+prefix. For example, http://127.0.0.1:18611/drawing/mcp serves browser routes under
+/drawing on port18611. The task action keeps only stable config/state paths;
+setup and uninstall follow the URL's one port.
+
+All normal services start as the person at logon through `pythonw.exe -X utf8`
+and the in-process background logging bootstrap. Only core and the D365 servers
+request Highest elevation. Knowledge, Canvas, Sourcecache and the gateway use
+the person's ordinary token. Without autologon they start after desktop sign-in.
 
 ## 5. The source index (once per box)
 
@@ -315,7 +307,7 @@ so; xref still works. Install it once, in an elevated Windows PowerShell
 ## 7. Visual Studio (Copilot)
 
 Visual Studio 2022 17.14+ reads `%USERPROFILE%\.mcp.json`. With the
-recommended `-Gateway all` layout, setup publishes these three entries
+standard gateway layout, setup publishes these three entries
 (tips and sign-in quirks in [Copilot in Visual Studio](VISUAL_STUDIO_COPILOT.md)).
 This is the shape to expect; setup supplies a distinct key for each entry:
 
@@ -332,12 +324,9 @@ This is the shape to expect; setup supplies a distinct key for each entry:
 
 Sourcecache, Canvas, D365 and selected browser/WHS backends do not have
 separate client entries in this layout. Ask Copilot to use Ferry's
-`service_list`, then `service_describe` for the service it needs. With direct
-routing, each service instead has its own HTTP entry and key.
-Setup replaces old generated stdio entries with the HTTP ones;
-an entry you changed by hand stays as it is and is reported, so the tools are
-never offered twice. Entries from older releases (`pondnt`, `d365`, `d365-xref`,
-`d365-source`) are reported for you to remove; `-Uninstall` removes them.
+`service_list`, then `service_describe` for the service it needs.
+Setup updates HTTP entries identified by their retained credentials. Customized
+and unrelated entries stay in place; remove obsolete entries yourself.
 Do not add new stdio entries: no pondNT server speaks stdio.
 
 Copilot needs **Agent** mode for any MCP tool; in Ask mode it says it cannot
@@ -402,122 +391,255 @@ repository, merge the handbook's `copilot-instructions.md` into its
 
 In an elevated PowerShell in `$p`, first remove what setup registered:
 
-    powershell -ExecutionPolicy Bypass -File .\setup.ps1 -Uninstall -Index J:\pondnt\d365.db
+    powershell -ExecutionPolicy Bypass -File .\setup.ps1 -Uninstall
 
 After asking, it stops and unregisters pondNT's scheduled tasks and removes
 their `.mcp.json` entries; then it offers to remove the Defender exclusions
-for this release's python. Give `-Index` the index file setup used: only then can it
-recognise the Sourcecache task, which otherwise stays in place. Tasks you
+for this release's python. Sourcecache's index is read from its owned task. Tasks you
 changed by hand are kept and reported.
 
 Then delete by hand what it lists, as you want: the service data
 (keys, notebook, canvases, logs) in `%LOCALAPPDATA%\boring-pondnt\services`,
-the handbook in `%LOCALAPPDATA%\boring-pondnt\handbook`, the index file and its folder,
+including each `services\<name>\client.headers.json` that can hold an active
+bearer, any `.mcp.json.bak-*` next to the client configuration (they may hold active
+bearer keys), the handbook in `%LOCALAPPDATA%\boring-pondnt\handbook`, the index file and its folder,
 state and logs in `%LOCALAPPDATA%\boring-pondnt` (unless `--state-dir` said
 otherwise), and last the folder `$p`.
 
 ### Recovery after an interrupted setup
 
-Setup records each apply/uninstall attempt under
-`%LOCALAPPDATA%\boring-pondnt\setup-attempts\`. The JSON records contain
-paths, chosen services/routing, the last saved phase and completed service
-steps. They contain no access keys. A setup killed between saves may have
-completed its current step; inspect the actual tasks/listeners before retrying.
+Setup stops on a failed step and names the failure; some services may already
+have restarted. Inspect the tasks/listeners, resolve the cause, preview the same
+service selection, then rerun. Setup creates operator configs once, retains keys,
+re-registers tasks and writes generated files only when they differ. It keeps no
+setup-attempt journal.
 
-A failed startup stops client publication and old-key retirement. Some
-services may already have restarted. The existing client file stays until
-publication succeeds; after publication, a cleanup failure leaves the new
-client in place. Setup reports failure and the recovery-record path.
+Each service's private `client.headers.json` owns its bearer. Setup stores that
+file before accepting its hash in `keys.json`, so a rerun repairs an interrupted
+first creation or client publication without issuing another key. New keys and
+migrated annual keys have a fixed 100-year technical expiry. Migration matches
+the existing bearer against its accepted fingerprint and retains it only while
+it is unexpired. At or after expiry, setup refuses without changing files;
+review and use `-RotateKeys` to replace it. Ordinary reruns do not extend expiry.
 
-Read that record's `retry_preview` command first. It includes the full service
-selection, explicit routing, index and client path, so a retry retains opt-in
-backends even after a partial routing change. Run the preview, resolve any
-ownership/conflict messages, then use `retry_apply` to retry with normal prompts.
-Keep the named release folder until recovery is complete. Existing notebook,
-canvas, handbook and index data stay in their original locations.
+Use `-RotateKeys` only to replace credentials deliberately. Its preview names
+the selected services; applying stops their tasks before replacing credentials.
+Rotation publishes replacement client entries before restarting the selected
+tasks. A failed restart can therefore leave the new client entries in place.
+After an interrupted rotation, rerun **without** `-RotateKeys` to finish with
+the retained bearer. Other subjects' and manually labelled keys remain.
+Keep these private files under the person's profile, with access limited to
+that person, Administrators and SYSTEM. Never copy their contents into logs.
 
 ## 10. Update, and back
 
 An update is the new release's setup run over the old installation, with
-the same choices. Nothing is removed until you are content, and going back
-is the old release's setup run the same way. Keys, the notebook, canvases,
-the handbook and the index stay where they are throughout.
+the same choices. Keep both release folders and the recovery copy through
+acceptance. To go back, restore the old configuration and credentials, then
+use the old setup for a person/logon install or import the recorded task XML
+for the legacy SYSTEM/cmd install. Keys, the notebook, canvases, the handbook
+and the index stay where they are throughout.
 
 **1. Unpack beside the old one.** Download, check and unpack as in step 1,
-into its own folder (`C:\tools\boring-pondnt-NEW-win-x64`, or
-`C:\tools\pondnt-X.Y.Z-rcN` for a candidate). Leave the old
-folder where it is: it is your way back. Read the release's CHANGELOG for
-anything that changes data; a release that does says so, and then the way
-back is your backup, not the old folder.
+into its own folder (`C:\Program Files\pondNT\boring-pondnt-NEW-win-x64`, or
+`C:\Program Files\pondNT\pondnt-X.Y.Z-rcN` for a candidate). Leave the old
+folder in place for rollback. Read **Upgrading** in the ZIP's `CHANGELOG.md`
+beside `setup.ps1` and the
+[0.3.0 release page](https://github.com/the-boring-crocodile/boring-pondnt/releases/tag/v0.3.0).
+Keep the matching recovery copy for data and configuration restored by step 5.
 
-**2. Write down what is installed.** setup touches only the services you
-name, so name all of them; one left out keeps running from the old folder.
+**2. Make and verify the recovery copy.** Use an elevated PowerShell as
+the Windows user who installed pondNT. Review the installed tasks in Task
+Scheduler. Pause client work and stop the old pondNT tasks. Wait for their
+processes and listeners to exit before copying the data. Leave the task
+registrations in place until the copy below passes. It creates a new private
+folder under your profile. Set `$client` to the old client path if you used
+a custom `-McpJson` value.
 
-    Get-ScheduledTask -TaskPath '\pondNT\' | ForEach-Object { $_.TaskName + '  ' + $_.Actions[0].Execute + ' ' + $_.Actions[0].Arguments }
+~~~powershell
+$recovery = Join-Path $env:LOCALAPPDATA ('pondnt-recovery-' + (Get-Date -Format 'yyyyMMdd-HHmmss'))
+& {
+    $ErrorActionPreference = 'Stop'
+    $state = Join-Path $env:LOCALAPPDATA 'boring-pondnt'
+    $client = Join-Path $env:USERPROFILE '.mcp.json'
+    $tasks = @(Get-ScheduledTask -TaskPath '\pondNT\' | Sort-Object TaskName)
+    if (-not $tasks.Count) { throw 'No tasks to back up under \pondNT\.' }
+    if ($tasks | Where-Object { $_.State -in 'Running', 'Queued' }) { throw 'Stop the pondNT tasks first.' }
+    if (-not (Test-Path -LiteralPath $state -PathType Container) -or
+        -not (Test-Path -LiteralPath $client -PathType Leaf)) { throw 'Check the old state and client paths.' }
 
-The task names give the selection (`pondNT boring-pondnt` is `core`,
-`boring-d365web` is `d365web`, and so on; `boring-gateway` is the gateway,
-which `-Gateway keep` keeps as it is). Note the index file Sourcecache
-uses: setup recognises that task only with `-Index`.
+    # Creation fails if the destination already exists. Seal it before copying data.
+    New-Item -ItemType Directory -Path $recovery | Out-Null
+    $me = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+    icacls.exe $recovery /inheritance:r /grant:r "*$($me):(OI)(CI)F" '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw 'Could not set private recovery permissions.' }
+
+    $known = [ordered]@{
+        'pondNT boring-sourcecache' = 'sourcecache'
+        'pondNT boring-knowledge' = 'knowledge'
+        'pondNT boring-canvas' = 'canvas'
+        'pondNT boring-pondnt' = 'core'
+        'pondNT boring-d365' = 'd365'
+        'pondNT boring-d365whsapp' = 'd365whsapp'
+        'pondNT boring-d365web' = 'd365web'
+        'pondNT boring-d365data' = 'd365data'
+    }
+    $services = @($known.Keys | Where-Object { $_ -in $tasks.TaskName } | ForEach-Object { $known[$_] })
+    if (-not $services.Count) { throw 'Review the task names and record the service selection.' }
+    $index = $null
+    $sourcecache = $tasks | Where-Object TaskName -eq 'pondNT boring-sourcecache'
+    if ($sourcecache) {
+        $arguments = @($sourcecache.Actions | ForEach-Object Arguments) -join ' '
+        $match = [regex]::Match($arguments, '(?<!\S)"?--db"?\s+(?:"([^"]+)"|([^\s"]+))')
+        if (-not $match.Success) { throw 'Review the Sourcecache action for its existing --db path.' }
+        $index = if ($match.Groups[1].Success) { $match.Groups[1].Value } else { $match.Groups[2].Value }
+        if (-not (Test-Path -LiteralPath $index -PathType Leaf)) { throw 'Check the existing Sourcecache index path.' }
+    }
+
+    $n = 0
+    $records = @(
+        foreach ($task in $tasks) {
+            $xml = 'task-{0:D3}.xml' -f (++$n)
+            Export-ScheduledTask -TaskName $task.TaskName -TaskPath $task.TaskPath |
+                Set-Content -LiteralPath (Join-Path $recovery $xml) -Encoding Unicode
+            [pscustomobject]@{
+                Name = $task.TaskName
+                Path = $task.TaskPath
+                Principal = $task.Principal | Select-Object UserId, GroupId, RunLevel
+                LogonType = [string]$task.Principal.LogonType
+                Action = @($task.Actions | Select-Object Execute, Arguments, WorkingDirectory)
+                Xml = $xml
+            }
+        }
+    )
+    ConvertTo-Json -InputObject $records -Depth 6 |
+        Set-Content -LiteralPath (Join-Path $recovery 'tasks.json') -Encoding UTF8
+    @{ Services = $services -join ','; Index = $index } | ConvertTo-Json |
+        Set-Content -LiteralPath (Join-Path $recovery 'selection.json') -Encoding UTF8
+    Copy-Item -LiteralPath $state -Destination $recovery -Recurse -Force
+    $clientCopy = Join-Path $recovery '.mcp.json'
+    Copy-Item -LiteralPath $client -Destination $clientCopy
+
+    $stateCopy = Join-Path $recovery 'boring-pondnt'
+    $saved = Get-Content -LiteralPath (Join-Path $recovery 'tasks.json') -Raw | ConvertFrom-Json
+    $selection = Get-Content -LiteralPath (Join-Path $recovery 'selection.json') -Raw | ConvertFrom-Json
+    if (@($saved).Count -ne $tasks.Count -or
+        @(Get-ChildItem -LiteralPath $recovery -Filter 'task-*.xml' -File).Count -ne $tasks.Count -or
+        $selection.Services -ne ($services -join ',') -or $selection.Index -ne $index -or
+        -not (Test-Path -LiteralPath $stateCopy -PathType Container)) { throw 'Recovery copy is incomplete.' }
+    foreach ($record in $saved) {
+        $definition = [xml](Get-Content -LiteralPath (Join-Path $recovery $record.Xml) -Raw)
+        if (-not $definition.Task) { throw 'An exported task XML is incomplete.' }
+    }
+    if ((Get-FileHash -LiteralPath $client).Hash -ne (Get-FileHash -LiteralPath $clientCopy).Hash) {
+        throw 'Client configuration copy differs.'
+    }
+    $serviceRoot = Join-Path $state 'services'
+    foreach ($config in (Get-ChildItem -LiteralPath $serviceRoot -Directory -Force |
+            Get-ChildItem -Filter '*.json' -File -Force)) {
+        $copy = Join-Path $stateCopy $config.FullName.Substring($state.Length + 1)
+        if ((Get-FileHash -LiteralPath $config.FullName).Hash -ne (Get-FileHash -LiteralPath $copy).Hash) {
+            throw 'A service configuration copy differs.'
+        }
+    }
+    "Verified recovery copy: $recovery"
+}
+~~~
+
+Keep the folder private. The copy records every task, including any custom
+tasks and the old gateway. Review `selection.json` against the installed
+services before step 3. Leave the gateway out of `-Services` because setup
+derives its new routing. Keep the existing Sourcecache index at its
+recorded path. Customized tasks need manual review.
+
+**Legacy SYSTEM/cmd layout (including published 0.2.10).** Plan an outage
+for the upgrade. After the recovery copy passes and its tasks are stopped,
+unregister the old SYSTEM/cmd tasks in Task Scheduler. Keep the
+person/logon registrations and existing client settings. The preview in
+step 3 comes **after** stopping the old tasks and unregistering the SYSTEM
+tasks. If you need to go back from this point, use the recovery copy and
+the matching step 5 below.
 
 **3. Look, then apply**, in an elevated PowerShell in the new folder.
-The example below includes all three opt-in backends. Set `$services` to the
-complete selection actually installed; omit unconfigured opt-ins and retain
-the index path, environment configuration and gateway choice from step 2.
 
-    $services = 'sourcecache,knowledge,canvas,core,d365,d365web,d365whsapp,d365data'
-    $index = 'J:\pondnt\d365.db'
-    powershell -ExecutionPolicy Bypass -File .\setup.ps1 -WhatIf -SkipIndex -Gateway keep -Services $services -Index $index
-    powershell -ExecutionPolicy Bypass -File .\setup.ps1 -Yes -SkipIndex -Gateway keep -Services $services -Index $index
+- **Person/logon layout throughout.** Omit `-Services` and `-Index` to update
+  the current owned task scope when it matches the recorded selection. Supply
+  `-Services` if setup reports configured services outside that scope, or to add
+  a prepared service. Existing owned services remain included.
 
-These commands are for PowerShell, so from `cmd` pass service lists without
-quotes (`-Services knowledge,canvas,core`) because `cmd` passes single quotes
-through and setup rejects those names.
+      powershell -ExecutionPolicy Bypass -File .\setup.ps1 -WhatIf
+      powershell -ExecutionPolicy Bypass -File .\setup.ps1
 
-The preview should say "key kept" for every service (a key with fewer than
-30 days left says "new key": it is renewed) and name no service you did not
-expect. `-Yes` does not add a Defender exclusion; if you use
-one, the new python needs its own (`-AddDefenderExclusion`, step 2).
+- **Legacy SYSTEM/cmd layout.** Pass the complete service selection and,
+  when selected, Sourcecache's existing index recorded in step 2. Use the
+  same PowerShell window or set `$recovery` to your verified folder first.
 
-**4. Check.** Every selected task now starts the new folder's python (the
-command from step 2 again), `.\boring-pondnt-core.cmd --self-check` passes,
+      $selection = Get-Content -LiteralPath (Join-Path $recovery 'selection.json') -Raw | ConvertFrom-Json
+      $legacy = @('-Services', $selection.Services)
+      if ($selection.Index) { $legacy += @('-Index', $selection.Index) }
+      powershell -ExecutionPolicy Bypass -File .\setup.ps1 @legacy -WhatIf
+      powershell -ExecutionPolicy Bypass -File .\setup.ps1 @legacy
+
+  Standard setup builds the fixed gateway from that service selection.
+  Old direct routes and gateway choices do not determine the new layout.
+
+The preview should say "key kept" for every existing service and name every
+service you recorded in step 2. It lists service folders outside the current
+run and refuses to proceed without `-Services` if it finds any. Check the
+scope before applying. For an old local config, the preview lists
+`config.json: adds mode=keys` under its service. Apply adds that field before
+switching tasks. Use `-RotateKeys` only for deliberate replacement.
+`-Yes` alone adds no Defender exclusion; `-Yes -AddDefenderExclusion` adds it
+without another question. Each release's Python needs its own exclusion if you
+choose one (step 2).
+
+**4. Check.** Every selected task now starts the new folder's python (inspect the scheduled task actions), `.\boring-pondnt-core.cmd --self-check` passes,
 and Visual Studio's `bootstrap` names the expected server/version. With
 Ferry, inspect `service_list` and make one harmless read against each backend
 you need. A running task or listening gateway does not establish backend
 health. Keep the developer logged on: core and D365 backends are interactive
 logon tasks, not unattended boot services.
 
-If apply stops, inspect the named
-[recovery record](#recovery-after-an-interrupted-setup) and actual tasks and
-listeners. Use its `retry_preview`, then `retry_apply`; a partial change is
-not an instruction to uninstall or blindly replay the update.
+If apply stops, inspect the named failure and actual tasks/listeners, then
+[rerun setup without -RotateKeys](#recovery-after-an-interrupted-setup) after
+resolving the cause. A partial change is not an instruction to uninstall.
 
-**5. Back, if needed.** In the old folder, the same command as in 3: its
-setup takes the tasks back to the old python. Then check as in 4. A release
-before 0.2.9 does not lock its folder: run the `icacls` line from step 1 on
-the old folder first, or going back reopens what 0.2.9 closed.
+**5. Back, if needed.** The old release cannot read a local keys config with
+the added `mode` field. Before starting its tasks, restore the step 2 snapshot,
+including each `services\<name>\client.headers.json` and the matching keys
+the old release accepts. Follow the branch recorded in step 2:
 
-**6. Tidy up, once content.** Remove the Defender exclusions of the old
-python only (`Remove-MpPreference -ExclusionProcess 'C:\tools\boring-pondnt-OLD-win-x64\python\python.exe'`,
-and the same for `pythonw.exe`), then delete the old folder from an
-elevated prompt (setup locked it to administrators). Do not run the old
+- **Person/logon layout:** stop the new tasks with the new release's uninstall,
+  then restore the matching old config, client settings and credential snapshot.
+  Follow the old release's setup procedure with the saved task scope and index;
+  older setup versions cannot read every new format or derive those arguments.
+- **Legacy SYSTEM/cmd layout:** from the new folder, run its
+  `powershell -ExecutionPolicy Bypass -File .\setup.ps1 -Uninstall`.
+  This reads the new owned task scope, stops/removes those tasks and keeps data.
+  Restore the matching old configs, client settings and credentials from
+  the recovery copy. Import the exported task XML in Task Scheduler under
+  the recorded task paths/names and original principals. Start those tasks.
+
+For either branch, check the restored old release. Compare task executable
+paths and triggers with the step 2 record, confirm the restored client
+entries in `.mcp.json`, and make one authenticated read through the restored
+client.
+
+**6. Tidy up only after accepting the forward upgrade.** Remove the Defender
+exclusions for the old Python executables. If the old release lived under
+`C:\tools`, for example, use
+`Remove-MpPreference -ExclusionProcess 'C:\tools\boring-pondnt-OLD-win-x64\python\python.exe'`
+and the same for `pythonw.exe`. Then delete the old release folder from an
+elevated prompt when its Program Files permissions require it. Do not run the old
 release's `-Uninstall` for this: it removes the tasks, which now belong to
 the new release.
 
-**Optional tunnel tasks are separate.** `setup.ps1` manages only its own
-`\pondNT\` tasks. Inventory operator-created tasks under `\pondNT-tunnel\`
-and any custom launcher before retiring a release. Keep their original
-arguments and private process receipts. Use the tunnel helper's recorded
-stop/start procedure, update `-Release` and any path to its scripts, then
-verify an authenticated remote read. For rollback restore those same paths
-to the retained old release. A reconnect task does not update backend
-processes. See [the tunnel guide](DEVBOX_TUNNEL.md#set-up).
-
-**With a manual launcher** (CMD files that start the servers instead of
-scheduled tasks): preserve the old launcher and its complete configuration,
-stop its owned processes, point it at the new folder, start it, and check
-as in step 4. The way back is the old launcher and retained release.
-This is an operator-maintained route; setup does not migrate or verify it.
+**The separate tunnel.** The optional tunnel has its own window and state,
+independent of setup.
+Disable old tunnel logon/ensure tasks and stop their old processes before
+opening it. Keep their private records until migration is accepted; the new
+launcher leaves them in place. Follow the [tunnel migration](DEVBOX_TUNNEL.md#move-from-the-previous-tunnel)
+for the Windows handoff and Linux component. Run setup from the desktop.
 
 ## Optional: reaching the box from a Pond
 
@@ -539,9 +661,9 @@ launcher, its processes run under the launching account and start when that
 launcher runs. Such a launcher has its own recovery arrangements; this setup
 command manages scheduled tasks.
 
-The recommended base setup has six scheduled tasks: five services plus
-Ferry. Selecting all three browser/WHS/data opt-ins makes nine. Without Ferry, the
-base setup has five. Tasks live under `\pondNT\`, each starting one server on
+The standard base setup has six scheduled tasks: five services plus
+Ferry. Selecting all three browser/WHS/data opt-ins makes nine.
+Tasks live under `\pondNT\`, each starting one server on
 127.0.0.1. Each restarts up to three times, a minute apart, and has no time
 limit. `%LOCALAPPDATA%` is that of the person who ran setup.
 
@@ -552,47 +674,47 @@ limit. `%LOCALAPPDATA%` is that of the person who ran setup.
 | `pondNT boring-d365web` | D365 browser, 18516 (opt-in) | you, through `pythonw.exe` | at logon | yes | `...\services\d365web` |
 | `pondNT boring-d365whsapp` | WHS app/form, 18515 (opt-in) | you, through `pythonw.exe` | at logon | yes | `...\services\d365whsapp` |
 | `pondNT boring-d365data` | OData/DMF, 18518 (opt-in) | you, through `pythonw.exe` | at logon | yes | `...\services\d365data` |
-| `pondNT boring-sourcecache` | Sourcecache, 18501 | SYSTEM | at boot | yes | `...\services\sourcecache`; the index file where `-Index` says |
-| `pondNT boring-knowledge` | Knowledge, 18512 | SYSTEM | at boot | yes | `...\services\knowledge` (`notebook.db`) |
-| `pondNT boring-canvas` | Canvas, 18511 (web page 18510) | SYSTEM | at boot | yes | `...\services\canvas` |
-| `pondNT boring-gateway` | the gateway (boring-mcp-ferry), 18517; only with `-Gateway` | SYSTEM | at boot | yes | `...\services\gateway` (`ferry.json`, one `<service>.headers.json` per service behind it: that service's key) |
+| `pondNT boring-sourcecache` | Sourcecache, 18501 | you, through `pythonw.exe` | at logon | no | `...\services\sourcecache`; the index file where `-Index` says |
+| `pondNT boring-knowledge` | Knowledge, 18512 | you, through `pythonw.exe` | at logon | no | `...\services\knowledge` (`notebook.db`) |
+| `pondNT boring-canvas` | Canvas MCP and browser, 18511 | you, through `pythonw.exe` | at logon | no | `...\services\canvas` |
+| `pondNT boring-gateway` | the gateway (boring-mcp-ferry), 18517; when a selected backend uses it | you, through `pythonw.exe` | at logon | no | `...\services\gateway` (generated `ferry.json`; references each backend's `client.headers.json`) |
 
-Each folder holds the server's `config.json`, `keys.json` and `service.log`.
+Each folder holds the server's `config.json`, `client.headers.json`, accepted
+key file (normally `keys.json`) and `service.log`. Generated Ferry routes follow the owned task scope and reference those header files.
 Besides the tasks, setup writes:
 
-- the release folder's permissions: off inheritance, administrators and
-  SYSTEM full, Users read and run ([who may change that folder](#1-download-check-and-unpack));
-
-- `%USERPROFILE%\.mcp.json`: three entries for the recommended layout,
-  or one per directly exposed server. A needed change gets a backup next to
-  it (`.mcp.json.bak-<time>-<id>`); an unchanged file is left alone;
+- `%USERPROFILE%\.mcp.json`: entries for the selected core and Knowledge
+  servers and the generated gateway, when present. A needed change gets a
+  backup next to it (`.mcp.json.bak-<time>-<id>`); backups can contain active
+  bearer keys. Keep them private. An unchanged file is left alone;
 - `%LOCALAPPDATA%\boring-pondnt\handbook`: the handbook, copied once;
-- the source index, if it builds one;
 - Defender process exclusions for this release's `python.exe` and
-  `pythonw.exe`, only if you agree.
+  `pythonw.exe`, only with `-AddDefenderExclusion` and approval.
 
 The core keeps its job output and call log in `%LOCALAPPDATA%\boring-pondnt`.
-The optional Pond tunnel takes 18520/18522 for core/D365 and 18524/18526 for
-the warehouse/browser servers, plus 18528 for d365data.
+The optional Pond tunnel defaults to 18530/18532 for core/D365 and
+18534/18536 for the warehouse/browser servers, plus 18538 for d365data.
 
 `.\setup.ps1 -Uninstall` removes the `.mcp.json` entries and the tasks it
 recognises as its own, and offers to remove the Defender exclusions. It keeps
 the folders, the handbook and the index, and lists them for you (step 9).
+Remove `services\<name>\client.headers.json` separately when discarding service
+credentials. Those bearer keys may still be accepted by the retained key
+files. Client backups can contain the same keys.
 
 ### Why these accounts
 
-The core and the D365 server run as you, because Copilot's commands run in
-them and must see your profile, git credentials and PATH; d365fo.tools needs
-them elevated. The general services run as SYSTEM, because a task under your
-own account does not fire at boot on these VMs; they need no stored password
-and show no window.
+Every normal service runs as the person at logon and shows no console window.
+Core and the D365 servers use Highest elevation because their commands and
+D365 tooling need that authority. The other services use the person's ordinary
+token. No service starts before desktop sign-in; autologon is the operator's
+choice, not something setup configures.
 
 This installer is limited to the single-administrator disposable development
-box. The release folder is locked to administrators, which that developer is,
-and the state directory is the developer's own; scheduled services run as
-SYSTEM. This is not an isolation boundary against that developer.
-For shared machines, use the separately configured standalone services and a
-reviewed service identity instead of assuming this installer supplies one.
+box. Establish administrator-controlled permissions for the release folder
+and review the permission warning in step 1. The state directory belongs
+to the developer, who is an administrator. Shared-machine service identities
+are outside this install.
 
 ### Recognising its own tasks
 
@@ -600,19 +722,21 @@ Setup recognizes existing tasks by their complete service command, working
 directory, principal and trigger. A matching name alone is not
 ownership. Customized or unrecognized definitions are retained and require
 manual review; automatic upgrade refuses them before writing service settings.
-Uninstall only considers owned service entries. Supply the existing `-Index`
-when removing Sourcecache so its complete command can be verified; otherwise
-its task stays in place. Leftover Python processes must match both executable
-and complete service command before setup can stop them.
+Uninstall only considers owned service entries. Sourcecache's index comes from its verified task, including during uninstall. Setup stops only the checked Scheduler task, then
+waits for that task to stop and its configured ports to clear. It never kills
+an arbitrary listener or reconstructs ownership of leftover processes. Startup
+checks the task is Running and all configured listeners exist; this does not
+prove authenticated tool behavior, which the acceptance steps check separately.
 
 ### Access keys
 
 Every server lets in only callers it knows. On this machine that is an
 **access key** per server. Setup makes one key per server for you (role
-writer, one year; running setup again renews it when fewer than 30 days are
-left). A directly exposed server's key goes into its `.mcp.json` entry as
-`Authorization: Bearer ...`. A backend behind Ferry instead has its key in
-`services\gateway\<service>.headers.json`; the client holds Ferry's own key. The servers listen on this machine's loopback
+writer, fixed 100-year technical expiry). Setup keeps the bearer in the service's
+private `client.headers.json` and its accepted hash in the configured key file.
+A direct client entry copies that header; Ferry references the same file.
+Ordinary reruns retain the key and expiry. `-RotateKeys` explicitly replaces
+the selected setup keys. The servers listen on this machine's loopback
 interface only, but the key itself is not bound to the device: it is a bearer
 secret, and whoever holds it and can reach the port acts with its role. Keep
 `.mcp.json` private.
@@ -640,11 +764,6 @@ distinguishes the VS Code format from Visual Studio and other harnesses.
 
 ### The handbook
 
-An install from before the handbook (a state `kit` folder) is not migrated:
-setup refuses before configuring anything. Uninstall it with its own setup
-(`-Uninstall`), move `%LOCALAPPDATA%\boring-pondnt\kit` aside (copy your own
-edits into the handbook later), then run this setup.
-
 The core serves `%LOCALAPPDATA%\boring-pondnt\handbook`.
 The first setup copies the release's `handbook\` there. Later releases leave
 it alone and report new pages separately from files that differ. Ferry uses
@@ -656,9 +775,11 @@ remove your handbook folder and run setup again. `-Uninstall` keeps it.
 
 ### The general services on their own
 
-Sourcecache, Knowledge and Canvas are separate applications; the core does
-not route or own them. Besides access keys they can let callers in by OAuth
-introspection, or both. The release folder has their configuration guide
+Sourcecache, Knowledge and Canvas are separate applications. Each frontend
+uses one authentication mode: `keys` (local access keys), `crocodile`
+(Crocodile-issued tokens), or `issuer` (its own OAuth issuer).
+A single frontend cannot combine keys and OAuth. The release folder has
+their configuration guide
 (`SERVICES_CONFIGURATION.md`) and `examples\`.
 
 They run on the bundled Python runtime through their launchers; a separate

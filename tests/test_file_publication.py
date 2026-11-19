@@ -40,6 +40,53 @@ def test_cooperating_processes_compare_hash_under_one_lock(tmp_path):
         assert sorted(job.result(timeout=30) for job in jobs) == ["stale", "written"]
 
 
+@pytest.mark.parametrize("operation", ["write", "patch", "bytes"])
+@pytest.mark.parametrize("kind", ["directory", "symlink", "fifo", "socket", "hardlink"])
+def test_mutation_tools_report_the_forbidden_kind_without_changes(tmp_path, operation, kind):
+    import socket
+    target = tmp_path / "target"
+    target.write_bytes(b"original")
+    path = tmp_path / "named"
+    server = None
+    if kind == "directory":
+        path.mkdir()
+    elif kind == "symlink":
+        try:
+            path.symlink_to(target)
+        except OSError:
+            pytest.skip("native symlink privilege unavailable")
+    elif kind == "fifo":
+        if not hasattr(os, "mkfifo"):
+            pytest.skip("FIFO fixture needs POSIX")
+        os.mkfifo(path)
+    elif kind == "socket":
+        if os.name == "nt":
+            pytest.skip("POSIX socket path fixture")
+        server = socket.socket(socket.AF_UNIX)
+        server.bind(str(path))
+    else:
+        os.link(target, path)
+    calls = {
+        "write": lambda: textfiles.write_text(str(path), "new", None),
+        "patch": lambda: textfiles.patch_text(str(path), disk.sha256_bytes(b"original"),
+                                            [{"old_text": "original", "new_text": "new"}]),
+        "bytes": lambda: binfiles.write_bytes(str(path), "eA==", None),
+    }
+    try:
+        with pytest.raises(Refused) as caught:
+            calls[operation]()
+        data = caught.value.as_data()
+        expected = kind if kind in ("directory", "symlink") else "other"
+        assert (data["status"], data["code"], data["kind"]) == ("refused", "forbidden", expected)
+        hint = {"directory": "file_list", "symlink": "do not follow links",
+                "fifo": "FIFOs", "socket": "sockets", "hardlink": "multiple hard links"}[kind]
+        assert hint in data["message"]
+        assert target.read_bytes() == b"original"
+    finally:
+        if server is not None:
+            server.close()
+
+
 def test_hardlink_refusal_preserves_both_names(tmp_path):
     path = tmp_path / "original"
     path.write_bytes(b"original")

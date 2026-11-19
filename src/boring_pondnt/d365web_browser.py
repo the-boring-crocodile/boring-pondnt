@@ -43,9 +43,10 @@ COMMAND_SECONDS = 30.0
 class BrowserError(Exception):
     """A browser-level failure. `code` is stable (no_edge, start_failed, cdp_error, timeout, closed)."""
 
-    def __init__(self, code: str, message: str) -> None:
+    def __init__(self, code: str, message: str, *, before_action: bool = False) -> None:
         super().__init__(f"{code}: {message}")
         self.code, self.message = code, message
+        self.before_action = before_action  # the whole attempted input was rejected locally
 
 
 # --- WebSocket client (RFC 6455, client side, loopback only) -------------------------------------
@@ -310,7 +311,7 @@ class Page:
         modifiers = 0
         for mod in mods:
             if mod not in MODIFIERS:
-                raise BrowserError("cdp_error", f"unknown modifier {mod!r}")
+                raise BrowserError("cdp_error", f"unknown modifier {mod!r}", before_action=True)
             modifiers |= MODIFIERS[mod]
         if name in KEYS:
             code, vk = KEYS[name]
@@ -321,7 +322,7 @@ class Page:
             code, vk = OEM_KEYS[name]
             key = name
         else:
-            raise BrowserError("cdp_error", f"unknown key {name!r}")
+            raise BrowserError("cdp_error", f"unknown key {name!r}", before_action=True)
         base = {"key": key, "code": code, "windowsVirtualKeyCode": vk, "modifiers": modifiers}
         self.send("Input.dispatchKeyEvent", {"type": "rawKeyDown", **base})
         self.send("Input.dispatchKeyEvent", {"type": "keyUp", **base})

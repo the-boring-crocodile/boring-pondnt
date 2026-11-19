@@ -11,8 +11,8 @@ pytestmark = pytest.mark.skipif(sys.platform != "win32", reason="native Windows 
 
 
 @pytest.mark.parametrize("ending,expected", [
-    ("root_exit", "exited"), ("timeout", "timed_out"),
-    ("stop", "stopped"), ("shutdown", "stopped"),
+    ("root_exit", "completed"), ("timeout", "completed"),
+    ("stop", "cancelled"), ("shutdown", "cancelled"),
 ])
 def test_terminal_job_has_no_surviving_child(tmp_path, ending, expected):
     manager = Jobs(tmp_path / "state")
@@ -42,9 +42,10 @@ def test_terminal_job_has_no_surviving_child(tmp_path, ending, expected):
         elif ending == "shutdown":
             manager.shutdown()
         result = manager.wait([job_id], 30)
-        assert result["all_ended"]
+        assert result["settled"]
         status = result["jobs"][0]
         assert status["state"] == expected, status
+        assert status["timed_out"] is (ending == "timeout"), status
         assert status.get("cleanup_confirmed") is not False, status
         assert wait_dead(pid, 10), "terminal job left its synthetic child alive"
     finally:

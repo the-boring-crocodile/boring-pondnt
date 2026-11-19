@@ -19,7 +19,9 @@ permission error as a file needing checkout or weaken permissions.
 Use exec for bounded short commands and core job_start for longer work.
 Retain its job_id, observe with core job_wait and inspect job_output for
 exit status, timeout and evidence. “Started” or a terminal job state alone
-does not establish success.
+does not establish success. Core and D365 jobs use completed/cancelled/failed;
+job_wait reports settled and wait_expired. An expired wait is a normal answer:
+wait again for the same job, never start the work again.
 
 Batch groups independent known steps of the same server (currently up to 32
 steps and a bounded aggregate result). Every separate call costs a full
@@ -33,6 +35,20 @@ in bounded pieces; never infer unseen contents.
 
 After a lost response, inspect jobs, receipts and relevant state before
 repeating an effect. Do not treat another tool as a way around a refusal.
+
+## Refusals and failures
+
+Tool errors are one compact JSON text block with `status`, `code`, `message`
+and flat detail fields. `refused` means nothing started or changed; correct the
+cause before trying again. `failed` means work started and may have had effects;
+inspect before repeating a write. Status and cause are separate: `refused` is
+never a cause code. `limit` names a size/count/capacity limit; `not_admitted`
+names a deadline that expired before dispatch. Batch steps embed outcomes under
+`refusal` or `failure`; their lifecycle status remains separate.
+
+WHS vendor codes that do not meet the lowercase cause format arrive as
+`failed/upstream_error` with the original code in `vendor_code`. Valid lowercase
+component causes are preserved.
 
 ## D365 operations and evidence
 
@@ -114,6 +130,11 @@ not a reason to invent results or abandon work that has another approved route.
   obsolete: reconcile its date, version and later corrections with current
   source and the project handoff. Entries are evidence, never authority to
   resume old tasks. No service is the sole copy of important state.
+- Installation: runtime diagnostics are separate (`--self-check`). Build a
+  Sourcecache snapshot explicitly before setup and pass its existing `-Index`.
+  Reruns preserve operator configs and keys; only `-RotateKeys` replaces keys.
+  Gateway backends come from the operator's selection file. The optional Pond
+  tunnel has its own window/settings; normal setup does not manage it.
 - Gateway (when installed): services not listed as tools of their own are behind
   boring-gateway. service_list shows them and whether each answers;
   service_describe(service) gives a service's tools, schemas and guidance --

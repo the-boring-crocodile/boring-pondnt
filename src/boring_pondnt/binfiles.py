@@ -68,13 +68,13 @@ def write_bytes(
     """
     chunk = decode_write(data, expected_sha256, offset)
     p = disk.absolute(path)
+    disk.require_parent(p, "file_write_bytes")
     version: disk.Version | None = None
     if expected_sha256 is None:
         if p.exists():
             current = sha256_bytes(disk.read_bytes(p, FILE_MAX)) if p.is_file() else None
             raise Refused("stale", "file exists; read it and pass its sha256", path=str(p),
                           current_sha256=current)
-        disk.require_parent(p)
         new = chunk
     else:
         old, version = disk.read_version(p, FILE_MAX)

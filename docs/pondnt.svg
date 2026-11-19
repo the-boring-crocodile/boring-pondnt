@@ -1,7 +1,7 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="694pt" height="783pt" viewBox="0 0 694 783">
 <rect x="0" y="0" width="694" height="783" fill="#ffffff"/>
 <text x="20.0" y="36.0" font-family="Helvetica,Arial,sans-serif" font-size="18" font-weight="bold" fill="#111111" xml:space="preserve">pondNT: Copilot's tools on a D365 dev box</text>
-<text x="20.0" y="56.0" font-family="Helvetica,Arial,sans-serif" font-size="10" fill="#111111" xml:space="preserve">Container view · pondNT 0.2.9, the recommended layout</text>
+<text x="20.0" y="56.0" font-family="Helvetica,Arial,sans-serif" font-size="10" fill="#111111" xml:space="preserve">Container view · pondNT, the recommended layout</text>
 <text x="20.0" y="72.0" font-family="Helvetica,Arial,sans-serif" font-size="10" fill="#111111" xml:space="preserve">Small MCP servers between Copilot and a disposable Windows box, plus what Visual Studio does not know.</text>
 <g class="cluster"><rect x="6" y="90" width="664" height="527" fill="none" stroke="#929a96" stroke-width="1"/>
 <text x="16.0" y="607.0" font-family="Helvetica,Arial,sans-serif" font-size="10" fill="#111111" xml:space="preserve">A D365 dev box · Windows · disposable: no data you cannot afford to lose</text>
@@ -28,12 +28,12 @@
 <path transform="translate(180,242) scale(0.917)" d="M9 6.5 3.5 12 9 17.5 M15 6.5 20.5 12 15 17.5" fill="none" stroke="#7a9783" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></g>
 <g class="node"><title>knowledge</title><rect x="242" y="234" width="192" height="55" fill="#edf5ef" stroke="#7a9783" stroke-width="1.2"/>
 <text x="252.0" y="252.0" font-family="Helvetica,Arial,sans-serif" font-size="12" font-weight="bold" fill="#111111" xml:space="preserve">Knowledge</text>
-<text x="252.0" y="267.0" font-family="Helvetica,Arial,sans-serif" font-size="10" fill="#111111" xml:space="preserve">[service · SYSTEM]</text>
+<text x="252.0" y="267.0" font-family="Helvetica,Arial,sans-serif" font-size="10" fill="#111111" xml:space="preserve">[service · you]</text>
 <text x="252.0" y="282.0" font-family="Helvetica,Arial,sans-serif" font-size="10" fill="#111111" xml:space="preserve">the agent's notebook</text>
 <path transform="translate(402,242) scale(0.917)" d="M6 2.5h8.5l4 4v15H6z M14.5 2.5v4h4 M9 12h6 M9 15.5h6" fill="none" stroke="#7a9783" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></g>
 <g class="node"><title>ferry</title><rect x="464" y="234" width="192" height="70" fill="#edf5ef" stroke="#7a9783" stroke-width="1.2"/>
 <text x="474.0" y="252.0" font-family="Helvetica,Arial,sans-serif" font-size="12" font-weight="bold" fill="#111111" xml:space="preserve">Ferry</text>
-<text x="474.0" y="267.0" font-family="Helvetica,Arial,sans-serif" font-size="10" fill="#111111" xml:space="preserve">[gateway · SYSTEM]</text>
+<text x="474.0" y="267.0" font-family="Helvetica,Arial,sans-serif" font-size="10" fill="#111111" xml:space="preserve">[gateway · you]</text>
 <text x="474.0" y="282.0" font-family="Helvetica,Arial,sans-serif" font-size="10" fill="#111111" xml:space="preserve">four tools for the rest,</text>
 <text x="474.0" y="297.0" font-family="Helvetica,Arial,sans-serif" font-size="10" fill="#111111" xml:space="preserve">discovered when needed</text>
 <path transform="translate(624,242) scale(0.917)" d="M3.5 8h14 M14.5 5l3 3-3 3 M20.5 16h-14 M9.5 13l-3 3 3 3" fill="none" stroke="#7a9783" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></g>
@@ -46,7 +46,7 @@
 <path transform="translate(180,382) scale(0.917)" d="M9 6.5 3.5 12 9 17.5 M15 6.5 20.5 12 15 17.5" fill="none" stroke="#7a9783" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></g>
 <g class="node"><title>sc</title><rect x="242" y="374" width="192" height="55" fill="#edf5ef" stroke="#7a9783" stroke-width="1.2"/>
 <text x="252.0" y="392.0" font-family="Helvetica,Arial,sans-serif" font-size="12" font-weight="bold" fill="#111111" xml:space="preserve">Sourcecache, Canvas</text>
-<text x="252.0" y="407.0" font-family="Helvetica,Arial,sans-serif" font-size="10" fill="#111111" xml:space="preserve">[services · SYSTEM]</text>
+<text x="252.0" y="407.0" font-family="Helvetica,Arial,sans-serif" font-size="10" fill="#111111" xml:space="preserve">[services · you]</text>
 <text x="252.0" y="422.0" font-family="Helvetica,Arial,sans-serif" font-size="10" fill="#111111" xml:space="preserve">source index; drawings</text>
 <path transform="translate(402,382) scale(0.917)" d="M9 6.5 3.5 12 9 17.5 M15 6.5 20.5 12 15 17.5" fill="none" stroke="#7a9783" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></g>
 <g class="node"><title>web</title><rect x="464" y="374" width="192" height="70" fill="#edf5ef" stroke="#7a9783" stroke-width="1.2"/>
@@ -73,8 +73,8 @@
 <text x="242.0" y="699.0" font-family="Helvetica,Arial,sans-serif" font-size="10" font-weight="bold" fill="#9b784b" xml:space="preserve">Dotted ochre · not MCP, local:</text>
 <text x="242.0" y="715.0" font-family="Helvetica,Arial,sans-serif" font-size="10" fill="#111111" xml:space="preserve">a socket, a file, a command</text>
 <text x="464.0" y="651.0" font-family="Helvetica,Arial,sans-serif" font-size="12" font-weight="bold" fill="#111111" xml:space="preserve">Scope and limits</text>
-<text x="464.0" y="667.0" font-family="Helvetica,Arial,sans-serif" font-size="10" fill="#111111" xml:space="preserve">core runs commands as you, elevated:</text>
-<text x="464.0" y="683.0" font-family="Helvetica,Arial,sans-serif" font-size="10" fill="#111111" xml:space="preserve">they reach everything on the box.</text>
+<text x="464.0" y="667.0" font-family="Helvetica,Arial,sans-serif" font-size="10" fill="#111111" xml:space="preserve">All normal servers: you, at logon.</text>
+<text x="464.0" y="683.0" font-family="Helvetica,Arial,sans-serif" font-size="10" fill="#111111" xml:space="preserve">Core and D365 request elevation.</text>
 <text x="464.0" y="699.0" font-family="Helvetica,Arial,sans-serif" font-size="10" fill="#111111" xml:space="preserve">Each server: 127.0.0.1, its own key.</text>
 <text x="464.0" y="715.0" font-family="Helvetica,Arial,sans-serif" font-size="10" fill="#111111" xml:space="preserve">Optional: a Linux Pond calls core and</text>
 <text x="464.0" y="731.0" font-family="Helvetica,Arial,sans-serif" font-size="10" fill="#111111" xml:space="preserve">D365 through an SSH tunnel the box</text>

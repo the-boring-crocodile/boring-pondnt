@@ -10,8 +10,9 @@ Layout of `boring-pondnt-<version>-win-x64/`:
                        in python/Lib/site-packages
     pwsh/              portable PowerShell 7
     INSTALL.md         how to install, check and remove (docs/INSTALL.md)
+    CHANGELOG.md       release notes and upgrade guidance
     LICENSE, COPYING.md  our licence (AGPL-3.0-or-later; the output of the tools is yours)
-    setup.ps1          looks, shows the plan, sets up .mcp.json and the index on "yes" (tools/setup.ps1)
+    setup.ps1          previews and installs tasks and .mcp.json; uses an existing index (tools/setup.ps1)
     devbox-defender.ps1  Defender exclusions for the D365 box: report, -Apply, -Undo (tools/devbox-defender.ps1)
     browser-signin.cmd   signs in d365web's / d365whsapp's Edge profile, writes its config (tools/browser-signin.ps1)
     extras/pond-tunnel/  optional: the Pond tunnel we test with (docs/DEVBOX_TUNNEL.md, tools/)
@@ -37,6 +38,7 @@ carries it, with one file mode), and uv's per-install uv_cache.json is dropped.
 from __future__ import annotations
 
 import argparse
+import ast
 import datetime
 import hashlib
 import os
@@ -128,13 +130,18 @@ def write_release_archive(stage: Path, out: Path, release_name: str,
                           date_time: tuple[int, int, int, int, int, int] = (1980, 1, 1, 0, 0, 0)) -> Path:
     """The zip depends on the files' names and contents only: entries in sorted order,
     each with DATE_TIME (the commit's) and one mode, not the stage's mtimes and modes."""
+    files = sorted(path for path in stage.rglob("*") if path.is_file())
+    for path in files:
+        relative = path.relative_to(stage).as_posix()
+        if len(path.name) > 100 or len(relative) > 200:
+            raise ValueError(f"release path exceeds Windows packaging limits "
+                             f"(filename <=100, install-relative path <=200): {relative}")
     archive_path = out / f"{release_name}.zip"
     with zipfile.ZipFile(archive_path, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as archive:
-        for path in sorted(stage.rglob("*")):
-            if path.is_file():
-                entry = zipfile.ZipInfo(f"{stage.name}/{path.relative_to(stage).as_posix()}", date_time)
-                entry.external_attr = 0o644 << 16  # Windows ignores Unix modes; fixed, not the stage's
-                archive.writestr(entry, path.read_bytes(), zipfile.ZIP_DEFLATED, 6)
+        for path in files:
+            entry = zipfile.ZipInfo(f"{stage.name}/{path.relative_to(stage).as_posix()}", date_time)
+            entry.external_attr = 0o644 << 16  # Windows ignores Unix modes; fixed, not the stage's
+            archive.writestr(entry, path.read_bytes(), zipfile.ZIP_DEFLATED, 6)
     return archive_path
 
 
@@ -164,16 +171,19 @@ def write_services_test_config(stage: Path) -> None:
 
 
 def copy_service_integration_tests(services_root: Path, target: Path) -> None:
-    """Ship runtime integration tests; source-build/operator tests stay with source."""
-    develop.plain_copy(services_root / "tests", target)
-    (target / "test_build_preflight.py").unlink(missing_ok=True)  # tests the source build
-    # The Linux Docker installer's tests test boring-deploy on Linux, not the services this
-    # bundle runs: every test that imports boring_deploy stays with the source (by its
-    # imports, not a list of names, which once missed one).
-    for path in target.glob("test_*.py"):
-        if re.search(r"^\s*(import|from)\s+boring_deploy\b", path.read_text(encoding="utf-8"), re.M):
-            path.unlink()
-    (target / "test_default_home.py").unlink(missing_ok=True)  # reads the source tree's README
+    """Select runtime tests explicitly. Linux deploy and source-build tests stay in Services."""
+    target.mkdir(parents=True)
+    for name in ("test_authenticated_services.py", "test_ferry_input_reader.py",
+                 "test_local_cause_codes.py"):
+        shutil.copyfile(services_root / "tests" / name, target / name)
+
+
+def copy_service_audit_sources(services_root: Path, target: Path) -> None:
+    """Keep the source layout read by the Ferry parser test and vocabulary audit."""
+    for source in sorted(services_root.glob("*/src/**/*.py")):
+        destination = target / source.relative_to(services_root)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, destination)
 
 
 def enable_site_packages(python_dir: Path) -> None:
@@ -184,8 +194,24 @@ def enable_site_packages(python_dir: Path) -> None:
     pth.write_text("\r\n".join(lines) + "\r\n")
 
 
-COMMON = ("boring_registry", "boring_service_kit", "boring_file_core")
 LOCAL_PACKAGES = ("boring-pondnt", "boring-sourcecache-d365", "boring-knowledge", "boring-canvas", "boring-mcp-ferry")
+
+
+def common_packages(with_tests: bool) -> tuple[str, ...]:
+    """The Common wheels the committed locks pin: every boring-* package not built here.
+
+    Read from the locks, not listed by hand: a fixed list once missed boring-outcomes,
+    which Common 0.8 added, and no release could be built."""
+    locks = [REPO / "requirements.lock"] + ([REPO / "requirements-tests.lock"] if with_tests else [])
+    names = set()
+    for lock in locks:
+        for line in lock.read_text().splitlines():
+            name = re.match(r"(boring-[a-z0-9-]+)==", line)
+            if name and name[1] not in LOCAL_PACKAGES:
+                names.add(name[1].replace("-", "_"))
+    if not names:
+        raise FileNotFoundError("the committed locks pin no Common package")
+    return tuple(sorted(names))
 
 
 def common_preflight(common_wheels: Path, common_source: Path | None, with_tests: bool) -> dict:
@@ -193,7 +219,7 @@ def common_preflight(common_wheels: Path, common_source: Path | None, with_tests
     if not common_wheels.is_dir():
         raise FileNotFoundError(f"Common wheels directory missing: {common_wheels}")
     wheels = {}
-    for name in COMMON:
+    for name in common_packages(with_tests):
         found = sorted(common_wheels.glob(f"{name}-*.whl"))
         if len(found) != 1:
             raise FileNotFoundError(f"expected exactly one {name} wheel in {common_wheels}, found {len(found)}")
@@ -232,10 +258,35 @@ def check_release_version(app_version: str, release_name: str, wheels: list[Path
         raise SystemExit(f"pondNT version {app_version} disagrees with {json.dumps(wrong)}")
 
 
+def copy_tunnel(destination: Path) -> None:
+    """Only the Windows side of the optional tunnel."""
+    destination.mkdir(parents=True)
+    shutil.copyfile(REPO / "docs" / "DEVBOX_TUNNEL.md", destination / "README.md")
+    source = REPO / "tools" / "pond-tunnel"
+    shutil.copyfile(source / "settings.example.json", destination / "settings.example.json")
+    (destination / "pond-tunnel.cmd").write_bytes(
+        (source / "pond-tunnel.cmd").read_bytes().replace(b"\r\n", b"\n").replace(b"\n", b"\r\n"))
+
+
+def check_tunnel_service_names(services_root: Path) -> None:
+    def declared(path: Path, name: str) -> tuple[str, ...] | dict[str, str]:
+        for node in ast.parse(path.read_text(encoding="utf-8")).body:
+            if isinstance(node, ast.Assign) and any(
+                    isinstance(target, ast.Name) and target.id == name for target in node.targets):
+                return ast.literal_eval(node.value)
+        raise SystemExit(f"{path}: missing tunnel server declaration {name}")
+
+    linux = declared(services_root / "tunnel/deploy/model.py", "SERVICE_NAMES")
+    windows = declared(REPO / "src/boring_pondnt/pond_tunnel.py", "MODULES")
+    if set(linux) != set(windows):
+        raise SystemExit("Linux tunnel installer and Windows tunnel support different server names")
+
+
 def build(with_tests: bool, out: Path, services_root: Path, common_wheels: Path,
           common_source: Path | None = None) -> Path:
     global develop
     common = common_preflight(common_wheels, common_source, with_tests)
+    check_tunnel_service_names(services_root)
     _, develop = load(common_wheels)
     app_version = package_version()  # pondNT's; each wheel keeps its own (local_pins)
     commit = develop.git(REPO, "rev-parse", "--short", "HEAD").strip()
@@ -299,19 +350,14 @@ def build(with_tests: bool, out: Path, services_root: Path, common_wheels: Path,
     develop.plain_copy(REPO / "handbook", stage / "handbook")
     develop.plain_copy(REPO / "docs", stage / "docs")  # installed guides referenced by the handbook
     # Optional, not the default: the Pond tunnel we test with, shipped, not installed.
-    extras = stage / "extras" / "pond-tunnel"
-    extras.mkdir(parents=True)
-    shutil.copyfile(REPO / "docs" / "DEVBOX_TUNNEL.md", extras / "README.md")
-    for tool in ("devbox-start.ps1", "maintenance-state.ps1", "tunnel-account.sh",
-                 "devbox-teardown.sh", "tunnel_host.py"):
-        shutil.copyfile(REPO / "tools" / tool, extras / tool)
+    copy_tunnel(stage / "extras" / "pond-tunnel")
     for script in ("setup.ps1", "devbox-defender.ps1", "maintenance-state.ps1", "browser-signin.ps1"):
         (stage / script).write_bytes((REPO / "tools" / script).read_bytes().replace(b"\r\n", b"\n")
                                      .replace(b"\n", b"\r\n"))
     (stage / "INSTALL.md").write_bytes((REPO / "docs" / "INSTALL.md").read_bytes().replace(b"\r\n", b"\n")
                                        .replace(b"\n", b"\r\n"))  # Notepad-friendly
     develop.plain_copy(services_root / "examples", stage / "examples")
-    for name in ("LICENSE", "COPYING.md"):  # the bundle carries our licence
+    for name in ("LICENSE", "COPYING.md", "CHANGELOG.md"):
         shutil.copyfile(REPO / name, stage / name)
     shutil.copyfile(services_root / "docs/CONFIGURATION.md", stage / "SERVICES_CONFIGURATION.md")
     # PYTHONUTF8=1: Python's own stdio in UTF-8 even when redirected (Windows would use the
@@ -334,8 +380,7 @@ def build(with_tests: bool, out: Path, services_root: Path, common_wheels: Path,
         develop.plain_copy(REPO / "tests", stage / "tests")
         # Builder parity is a source-tree gate, already run on Linux. The
         # runtime bundle deliberately has neither builder nor package sources.
-        for source_only in ("test_build_preflight.py", "test_tunnel_host.py"):
-            (stage / "tests" / source_only).unlink()
+        (stage / "tests" / "test_build_preflight.py").unlink()
         for name in ("knowledge", "canvas", "sourcecache-d365", "mcp-ferry"):
             fixture = stage / "services-tests" / name
             develop.plain_copy(services_root / name / "tests", fixture / "tests")
@@ -345,6 +390,7 @@ def build(with_tests: bool, out: Path, services_root: Path, common_wheels: Path,
         develop.plain_copy(common_source / "packages/boring-service-kit", stage / "services-tests" / "kit")
         develop.plain_copy(services_root / "examples", stage / "services-tests" / "examples")  # knowledge's examples test
         copy_service_integration_tests(services_root, stage / "services-tests" / "integration")
+        copy_service_audit_sources(services_root, stage / "services-tests")
         write_services_test_config(stage)
         (stage / "run-services-tests.cmd").write_text(
             '@echo off\r\ncd /d "%~dp0"\r\nset PYTHONUTF8=1\r\n'
@@ -388,7 +434,7 @@ def main() -> None:
     parser.add_argument("--with-tests", action="store_true", help="include tests, pytest and run-tests.cmd")
     parser.add_argument("--out", type=Path, default=REPO / "dist")
     parser.add_argument("--services-root", type=Path, required=True, help="explicit boring-services checkout to package")
-    parser.add_argument("--common-wheels", type=Path, required=True, help="Pond Common release wheels (registry, service-kit, file-core)")
+    parser.add_argument("--common-wheels", type=Path, required=True, help="Pond Common release wheels; every Common package pinned by the selected locks")
     parser.add_argument("--common-source", type=Path, help="boring-pond-common checkout; required with --with-tests (kit tests)")
     args = parser.parse_args()
     build(args.with_tests, args.out.resolve(), args.services_root.resolve(), args.common_wheels.resolve(),

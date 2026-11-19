@@ -1,0 +1,43 @@
+{
+  "box": "devbox",
+  "ssh_host": "tunnel-devbox@YOUR-HOST",
+  "identity_file": "credentials/ssh-key",
+  "known_hosts_file": "credentials/known_hosts",
+  "crocodile_url": "https://YOUR-CROCODILE-HOST",
+  "servers": {
+    "core": {
+      "port": 18530,
+      "client_id_file": "credentials/devbox-id",
+      "secret_file": "credentials/devbox-secret"
+    },
+    "d365": {
+      "port": 18532,
+      "client_id_file": "credentials/devbox-d365-id",
+      "secret_file": "credentials/devbox-d365-secret"
+    },
+    "d365whsapp": {
+      "port": 18534,
+      "client_id_file": "credentials/devbox-d365whsapp-id",
+      "secret_file": "credentials/devbox-d365whsapp-secret",
+      "settings_file": "d365whsapp.json"
+    },
+    "d365web": {
+      "port": 18536,
+      "client_id_file": "credentials/devbox-d365web-id",
+      "secret_file": "credentials/devbox-d365web-secret",
+      "web": {
+        "url": "https://YOUR-AOS-HOST",
+        "company": "",
+        "profile": "pond-tunnel",
+        "debug_port": 9343,
+        "headless": false
+      }
+    },
+    "d365data": {
+      "port": 18538,
+      "client_id_file": "credentials/devbox-d365data-id",
+      "secret_file": "credentials/devbox-d365data-secret",
+      "settings_file": "d365data.json"
+    }
+  }
+}

@@ -53,7 +53,7 @@ def test_web_refuses_invalid_later_step_without_effect(web, tmp_path, bad):
     server = create_server(web, tmp_path)
     error, result = call(server, "web_run_scenario",
                          {"steps": [{"op": "press", "name": "SyntheticPost"}, bad]})
-    assert error and result["code"] == "refused"
+    assert error and result["code"] == "invalid_request"
     assert effects == [] and web.runs.get("browser") is None
 
 
@@ -84,7 +84,7 @@ def test_whs_refuses_before_backend_effect(web, tmp_path, form, bad):
         before = len(fake.requests)
     error, result = call(server, "whs_run_scenario", {"worker": "W1",
                          "steps": [{"press": "Inbound"}, bad]})
-    assert error and result["code"] == "refused"
+    assert error and result["code"] == "invalid_request"
     assert effects == [] and web.runs.get("browser") is None
     if not form:
         assert len(fake.requests) == before
@@ -116,7 +116,7 @@ def test_numeric_page_dependency_checked_before_dependent_step(web, tmp_path, sa
     assert not error and result["ok"] == ok
     assert effects == [("", 2, None)] if ok else effects == []
     if not ok:
-        assert result["steps"][1]["error"] == "refused"
+        assert result["steps"][1]["error"] == "invalid_request"
 
 
 def test_missing_saved_expectation_reports_runtime_error_without_second_action(web, tmp_path):
@@ -128,13 +128,13 @@ def test_missing_saved_expectation_reports_runtime_error_without_second_action(w
         {"op": "press", "name": "Read", "save": {"order": "field:Missing"}},
         {"op": "press", "name": "Second", "expect": {"caption": "${order}"}}]})
     assert not error and not result["ok"]
-    assert len(effects) == 1 and result["steps"][1]["error"] == "refused"
+    assert len(effects) == 1 and result["steps"][1]["error"] == "invalid_request"
 
 
 def test_web_runtime_failure_keeps_prior_transcript(web, tmp_path):
     def press(name, nth):
         if name == "Missing":
-            raise D365WebError("not_found", "synthetic page-dependent failure")
+            raise D365WebError("not_found", "synthetic page-dependent failure", status='refused')
         return {"scope": "form"}
     web._op_press = press
     server = create_server(web, tmp_path)

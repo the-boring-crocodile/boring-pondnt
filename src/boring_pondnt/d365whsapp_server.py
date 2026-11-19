@@ -41,6 +41,7 @@ from boring_service_kit.access import permitted
 from boring_service_kit.calllog import CallLog
 from boring_service_kit.http import ServiceConfig, add_config_argument
 from boring_service_kit.outcomes import Failed, Outcome, Refused
+from boring_outcomes import is_code
 from boring_service_kit.pond import attach_heartbeat
 from boring_service_kit.tools import READ_ONLY, RUNS, as_mcp_tool, default_state_dir, refuse_unknown_arguments
 
@@ -51,8 +52,6 @@ INSTRUCTIONS = (
     "has one server session; steps change real data in the connected D365."
 )  # + the mode's own sentence (create_server)
 SCENARIO_STEPS_MAX = 50
-REFUSAL_CODES = {"refused", "no_session", "no_company", "busy", "no_run", "not_found", "covered", "retry_later",
-                 "no_lookup"}  # no_lookup: a refusal in d365web too
 BUDGET_MARGIN = 5.0  # covers the recovery login (well under a second when warm)
 
 
@@ -63,8 +62,12 @@ CALL_LOG = "calls-d365whsapp.jsonl"
 def _outcome(error: WhsError) -> Outcome:
     details = {"page": error.page.summary()} if error.page is not None else {}
     details.update(getattr(error, "details", None) or {})  # form mode: d365web's details (its page)
-    cls = Refused if error.code in REFUSAL_CODES else Failed
-    return cls(error.code, error.message, **details)
+    code = error.code
+    if not is_code(code):
+        details["vendor_code"] = code
+        code = "upstream_error"
+    cls = Refused if error.status == "refused" else Failed
+    return cls(code, error.message, **details)
 
 
 def worker_key(worker: str) -> str:
@@ -290,13 +293,13 @@ def create_server(backend: AppBackend | FormBackend | WhsClient, state_dir: Path
         ("Run steps on a logged-in worker. Poll whs_wait if running. Form mode lists uncheckable expectations "
          "separately.")
         steps = substitute(steps, {k: str(v) for k, v in (variables or {}).items()},
-                           lambda message: Refused("refused", message))
+                           lambda message: Refused("invalid_request", message))
         try:
             check_steps(steps)
         except StepError as error:
-            raise Refused("refused", str(error)) from None
+            raise Refused("invalid_request", str(error)) from None
         if len(steps) > SCENARIO_STEPS_MAX:
-            raise Refused("refused", f"at most {SCENARIO_STEPS_MAX} steps per call")
+            raise Refused("limit", f"at most {SCENARIO_STEPS_MAX} steps per call")
         backend.require_session(worker)  # refuse before any step when not logged in
         return runs.start(worker, lambda transcript: _run(worker, steps, stop_on_mismatch, transcript))
 
@@ -355,7 +358,7 @@ def create_server(backend: AppBackend | FormBackend | WhsClient, state_dir: Path
     ) -> dict[str, Any]:
         """Read the worker's step and page log, newest last, up to 64 KiB. Passwords are masked."""
         if not 1 <= lines <= 500:
-            raise Refused("refused", "lines must be 1-500")
+            raise Refused("invalid_request", "lines must be 1-500")
         text = steps_log.tail(worker, lines)
         if text is None:
             raise Refused("not_found", f"worker {worker.upper()} has no step log yet")
@@ -404,7 +407,7 @@ def main(argv: list[str] | None = None) -> None:
                                  call_budget=config.call_limit, **(auth or {}))
         config.serve(make_server)
     except Outcome as outcome:
-        print(json.dumps(outcome.as_dict()), file=sys.stderr)
+        print(json.dumps(outcome.as_data()), file=sys.stderr)
         raise SystemExit(2) from None
     except (OSError, ValueError, KeyError, TypeError) as exc:
         print(json.dumps({"status": "failed", "code": "config", "message": str(exc)}), file=sys.stderr)

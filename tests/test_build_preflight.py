@@ -18,7 +18,7 @@ def builder(tmp_path, monkeypatch):
     spec.loader.exec_module(module)
     common = tmp_path / "common-dist"
     common.mkdir()
-    for name in module.COMMON:
+    for name in module.common_packages(False):
         (common / f"{name}-0.4.0-py3-none-any.whl").write_bytes(b"wheel")
     services = tmp_path / "services"
     services.mkdir()
@@ -37,9 +37,47 @@ def builder(tmp_path, monkeypatch):
     return module, services, common
 
 
+def test_packaged_tunnel_is_independent_of_setup_and_old_launcher(builder, tmp_path):
+    module, _, _ = builder
+    target = tmp_path / "extras" / "pond-tunnel"
+    module.copy_tunnel(target)
+    assert (target / "pond-tunnel.cmd").is_file()
+    assert (target / "settings.example.json").is_file()
+    assert {path.name for path in target.iterdir()} == {"README.md", "pond-tunnel.cmd", "settings.example.json"}
+
+
 def test_complete_common_wheels_pass(builder):
     module, _, common = builder
-    assert len(module.common_preflight(common, None, False)["common_wheels"]) == 3
+    assert len(module.common_preflight(common, None, False)["common_wheels"]) == len(module.common_packages(False))
+
+
+def test_common_wheels_follow_the_lock(builder):
+    """Every Common package the lock pins is packaged; a fixed list once missed boring-outcomes."""
+    import re
+    module, _, _ = builder
+    pinned = {m[1].replace("-", "_") for m in re.finditer(r"^(boring-[a-z0-9-]+)==", (ROOT / "requirements.lock").read_text(), re.M)
+              if m[1] not in module.LOCAL_PACKAGES}
+    assert set(module.common_packages(False)) == pinned
+    assert {"boring_outcomes", "boring_registry", "boring_service_kit", "boring_file_core"} <= pinned
+
+
+def test_test_only_common_wheel_is_required_only_with_tests(builder, tmp_path, monkeypatch):
+    """Exercise a new tests-lock dependency independently of today's real locks."""
+    module, _, common = builder
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "requirements.lock").write_text("boring-registry==0.4.0\nboring-pondnt==0.3.0rc1\n")
+    (repo / "requirements-tests.lock").write_text("boring-worker-kit==0.4.0\nboring-registry==0.4.0\n")
+    monkeypatch.setattr(module, "REPO", repo)
+    assert module.common_packages(False) == ("boring_registry",)
+    assert module.common_packages(True) == ("boring_registry", "boring_worker_kit")
+    assert len(module.common_preflight(common, None, False)["common_wheels"]) == 1
+    source = tmp_path / "common-source"
+    (source / "packages/boring-service-kit/tests").mkdir(parents=True)
+    with pytest.raises(FileNotFoundError, match="boring_worker_kit"):
+        module.common_preflight(common, source, True)
+    (common / "boring_worker_kit-0.4.0-py3-none-any.whl").write_bytes(b"test wheel")
+    assert len(module.common_preflight(common, source, True)["common_wheels"]) == 2
 
 
 @pytest.mark.parametrize("problem", ["missing-dir", "missing-wheel", "two-versions", "tests-without-source"])
@@ -67,17 +105,44 @@ def test_packaged_integration_collects_without_source_checkout(builder, tmp_path
     module, services, _ = builder
     source = services / "tests"
     source.mkdir()
-    (source / "test_build_preflight.py").write_text("raise RuntimeError(\"source-only dependency absent\")\n")
-    (source / "test_authenticated_services.py").write_text("def test_runtime_contract(): pass\n")
-    target = tmp_path / "isolated-bundle" / "integration"
+    portable = {"test_authenticated_services.py", "test_ferry_input_reader.py", "test_local_cause_codes.py"}
+    for name in portable:
+        (source / name).write_text("def test_runtime_contract(): pass\n")
+    linux_fixtures = {
+        "test_container_templates.py": "from deploy_context import deploy_context",
+        "test_deploy_data.py": "from deploy_context import deploy_context",
+        "test_install_defaults.py": "from test_install import host",
+        "test_install_ferry_registration.py": "from test_install import host",
+        "test_install_registration.py": "import pwd",
+    }
+    for name, imports in linux_fixtures.items():
+        (source / name).write_text(imports + "\nraise RuntimeError('Linux host fixture')\n")
+
+    stage = tmp_path / "isolated-bundle"
+    target = stage / "integration"
     module.copy_service_integration_tests(services, target)
     result = subprocess.run([sys.executable, "-I", "-m", "pytest", "--collect-only", "-q", str(target)],
-                            cwd=target.parent, capture_output=True, text=True, timeout=30)
+                            cwd=stage, capture_output=True, text=True, timeout=30)
     assert result.returncode == 0, result.stdout + result.stderr
-    assert "test_runtime_contract" in result.stdout
-    assert len(list(source.glob("test_*.py"))) == 2  # packaging never edits its source
+    assert "3 tests collected" in result.stdout
+    assert {path.name for path in target.glob("test_*.py")} == portable
 
 
+def test_packaged_source_audits_keep_relative_python_paths(builder, tmp_path):
+    module, services, _ = builder
+    paths = ("canvas/src/boring_canvas/mcp_service.py", "mcp-ferry/src/boring_mcp_ferry/config.py",
+             "fishmarket/src/boring_fishmarket/main.py")
+    for name in paths:
+        source = services / name
+        source.parent.mkdir(parents=True)
+        source.write_text(f"# {name}\n")
+    (services / "canvas/src/drawing.svg").write_text("<svg/>")
+
+    stage = tmp_path / "services-tests"
+    module.copy_service_audit_sources(services, stage)
+    assert {file.relative_to(stage).as_posix() for file in stage.rglob("*") if file.is_file()} == set(paths)
+    for name in paths:
+        assert (stage / name).read_bytes() == (services / name).read_bytes()
 
 
 def test_packaged_ferry_tests_can_import_their_sibling_fixture(builder, tmp_path):
@@ -149,6 +214,32 @@ def test_release_archive_preserves_candidate_version_and_install_folder(builder,
         assert json.loads(released.read(install + "/MANIFEST.json")) == manifest
     wheel = stage / f"boring_pondnt-{version}-py3-none-any.whl"
     module.check_release_version(version, name, [wheel], [f"boring_pondnt-{version}.dist-info"])
+
+
+@pytest.mark.parametrize("length", [200, 201])
+def test_install_relative_archive_path_ceiling(builder, tmp_path, length):
+    module, _, _ = builder
+    stage = tmp_path / "release"
+    path = stage / ("a" * 90) / ("b" * 90) / ("c" * (length - 182))
+    path.parent.mkdir(parents=True)
+    path.write_text("fixture")
+    assert len(path.relative_to(stage).as_posix()) == length
+    if length == 200:
+        assert module.write_release_archive(stage, tmp_path, "accepted").is_file()
+    else:
+        with pytest.raises(ValueError, match="install-relative path <=200"):
+            module.write_release_archive(stage, tmp_path, "refused")
+        assert not (tmp_path / "refused.zip").exists()
+
+
+def test_archive_filename_ceiling_is_checked_before_creating_zip(builder, tmp_path):
+    module, _, _ = builder
+    stage = tmp_path / "release"
+    stage.mkdir()
+    (stage / ("x" * 101)).write_text("fixture")
+    with pytest.raises(ValueError, match="filename <=100"):
+        module.write_release_archive(stage, tmp_path, "refused")
+    assert not (tmp_path / "refused.zip").exists()
 
 
 def test_release_archive_depends_on_names_and_contents_only(builder, tmp_path):

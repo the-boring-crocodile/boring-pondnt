@@ -42,7 +42,7 @@ def test_job_settlement_removes_descendants(fake_ps, tmp_path, monkeypatch, endi
             jobs.shutdown()
         result = jobs.wait(job["job_id"], 15)
         assert not result["wait_expired"]
-        assert result["state"] == ("exited" if ending == "root_exit" else "stopped")
+        assert result["state"] == ("completed" if ending == "root_exit" else "cancelled")
         assert result.get("cleanup_confirmed") is not False
         assert wait_dead(pid, 10)
     finally:
@@ -165,7 +165,7 @@ def test_job_does_not_publish_exit_while_cleanup_is_pending(tmp_path):
         assert jobs.status("j")["state"] == "running"
         release.set()
         watcher.join(5)
-        assert jobs.wait("j", 0)["state"] == "exited"
+        assert jobs.wait("j", 0)["state"] == "completed"
     finally:
         release.set()
         watcher.join(5)
@@ -202,7 +202,7 @@ def test_http_lifespan_shuts_down_session_and_jobs(fake_ps, tmp_path):  # noqa: 
     try:
         job = asyncio.run(scenario())
         assert session_tree._closed
-        assert server._d365_jobs.status(job["job_id"])["state"] == "stopped"
+        assert server._d365_jobs.status(job["job_id"])["state"] == "cancelled"
         assert server._d365_session.state["state"] == "closed"
     finally:
         server._d365_close()
@@ -269,7 +269,7 @@ def test_job_spawn_racing_shutdown_is_not_lost(fake_ps, tmp_path, monkeypatch): 
         closer.join(10)
         assert not worker.is_alive() and not closer.is_alive()
         assert not failures and len(started) == 1
-        assert jobs.status(started[0]["job_id"])["state"] == "stopped"
+        assert jobs.status(started[0]["job_id"])["state"] == "cancelled"
         assert jobs._get(started[0]["job_id"]).tree._closed
     finally:
         release.set()

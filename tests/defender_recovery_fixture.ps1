@@ -1,7 +1,7 @@
 param([Parameter(Mandatory)][string]$Helper, [Parameter(Mandatory)][string]$Fixture)
 $ErrorActionPreference = 'Stop'
 $env:COMPUTERNAME = 'synthetic-fixture'
-. $Helper
+. $Helper -Record (Join-Path $Fixture 'initial.json')
 
 function Require($Condition, [string]$Message) { if (-not $Condition) { throw $Message } }
 function Refuses([scriptblock]$Action) {

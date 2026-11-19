@@ -153,6 +153,7 @@ def _write_text(
     *, publisher,
 ) -> dict[str, Any]:
     p = disk.absolute(path)
+    disk.require_parent(p)
     existing: TextFormat | None = None
     version: disk.Version | None = None
     if expected_sha256 is None:
@@ -160,7 +161,6 @@ def _write_text(
             current = sha256_bytes(_read_text_bytes(p)) if p.is_file() else None
             raise Refused("stale", "file exists; read it and pass its sha256 to replace it", path=str(p),
                           current_sha256=current)
-        disk.require_parent(p)
     else:
         data, version = _read_text_version(p)
         current = version.sha256
@@ -212,6 +212,7 @@ def patch_text(
     """
     prepared = check_patch(edits)
     p = disk.absolute(path)
+    disk.require_parent(p, "file_patch")
     data, version = _read_text_version(p)
     current = version.sha256
     if current != expected_sha256:

@@ -122,7 +122,7 @@ def test_an_ambiguous_label_is_refused():
         web._wait_idle = lambda: True
         with pytest.raises(D365WebError) as caught:
             web._op_tree("", ["A"])
-        assert caught.value.code == "refused" and "more than one" in caught.value.message
+        assert caught.value.code == "ambiguous" and "more than one" in caught.value.message
     finally:
         web.shutdown()
 
@@ -148,7 +148,7 @@ def test_a_reference_group_by_its_own_name_is_refused_with_its_fields(monkeypatc
                                                     "parts": ["Worker_DirPerson_FK_Name"], "value": ""})
     with pytest.raises(D365WebError) as caught:
         web._op_set([("Worker", "Lars Giusti")])
-    assert caught.value.code == "refused" and caught.value.details["parts"] == ["Worker_DirPerson_FK_Name"]
+    assert caught.value.code == "unsupported" and caught.value.details["parts"] == ["Worker_DirPerson_FK_Name"]
     assert page.events == []
 
 
@@ -164,5 +164,5 @@ def test_a_file_upload_control_is_refused_without_a_click(monkeypatch, op):
                                                     "upload": "UploadControl", "value": ""})
     with pytest.raises(D365WebError) as caught:
         web._op_press("UploadControlBrowseButton", 0) if op == "press" else web._op_set([("UploadControl", "C:/x.pdf")])
-    assert caught.value.code == "refused" and caught.value.details["upload"] == "UploadControl"
+    assert caught.value.code == "unsupported" and caught.value.details["upload"] == "UploadControl"
     assert "file picker" in caught.value.message and page.events == []

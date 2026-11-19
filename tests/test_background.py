@@ -21,16 +21,23 @@ def test_output_goes_to_the_log_and_the_arguments_through(tmp_path, monkeypatch)
     assert log.read_text(encoding="utf-8") == "started\n"
 
 
+def test_canvas_arguments_pass_through_without_listener_overrides(tmp_path, monkeypatch):
+    from boring_pondnt import setup_services as setup
+    seen = []
+    monkeypatch.setattr(background.runpy, "run_module",
+                        lambda *args, **kwargs: seen.append(list(background.sys.argv)))
+    monkeypatch.setattr(background.sys, "stdout", None)
+    monkeypatch.setattr(background.sys, "stderr", None)
+    monkeypatch.setattr(background.sys, "argv", [])
+    action = setup.arguments(setup.SERVICES["canvas"], str(tmp_path), "", str(tmp_path))
+    background.main(["--log", str(tmp_path / "service.log"), "boring_canvas.server", *action])
+    background.sys.stdout.close()
+    assert seen == [["boring_canvas.server", *action]]
+    assert not {"--host", "--port", "--public-base-url"} & set(action)
+
+
 def test_the_d365_server_may_start_this_way_too():
     assert "boring_pondnt.d365_server" in background.ALLOWED
-
-
-def test_every_service_setup_runs_as_the_person_may_start_this_way():
-    """setup's tasks for account="user" services start through this launcher; a module
-    missing here exits 1 before any log line (d365whsapp and d365web on rc28)."""
-    from boring_pondnt.setup_services import SERVICES
-    user_modules = {s.module for s in SERVICES.values() if s.account == "user"}
-    assert user_modules == background.ALLOWED
 
 
 @pytest.mark.parametrize("argv", [[], ["--log", "x"], ["--log", "x", "os"], ["x", "y", "boring_pondnt.server"]])

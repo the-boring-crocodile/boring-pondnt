@@ -68,11 +68,11 @@ def test_refusals_are_errors_carrying_the_outcome(tmp_path):
     is_error, data = call(server, "file_read", {"path": "relative.txt"})
     assert is_error
     assert data == {"status": "refused", "code": "invalid_request", "message": "path must be absolute",
-                    "details": {"path": "relative.txt"}}
+                    "path": "relative.txt"}
     (tmp_path / "x").write_text("x")
     is_error, data = call(server, "file_write", {"path": str(tmp_path / "x"), "content": "y",
                                                  "expected_sha256": None})
-    assert is_error and data["code"] == "stale" and "current_sha256" in data["details"]
+    assert is_error and data["code"] == "stale" and "current_sha256" in data
 
 
 def test_unknown_arguments_are_refused(tmp_path):
@@ -175,7 +175,7 @@ def test_batch_starts_and_waits_for_a_job(tmp_path):
         {"id": "w", "method": "job_wait", "arguments": {"job_ids": [job_id], "wait_seconds": 10}},
         {"id": "o", "method": "job_output", "arguments": {"job_id": job_id}},
     ])
-    assert data["results"][0]["result"]["all_ended"]
+    assert data["results"][0]["result"]["settled"]
     assert data["results"][1]["result"]["content"] == "built\n"
 
 
@@ -189,7 +189,7 @@ def test_batch_stops_at_the_result_limit(tmp_path, monkeypatch):
              for i in range(4)]
     _, data = batch(server, steps)
     assert [r["status"] for r in data["results"]] == ["succeeded", "succeeded", "not_started", "not_started"]
-    assert data["stop_reason"] == "result_limit" and data["result_chars"] > 1000
+    assert data["stop_reason"] == "output_limit" and data["result_chars"] > 1000
 
 
 def test_lean_schema_keeps_parameters_named_like_annotations():

@@ -246,7 +246,7 @@ def create_server(client: DataClient, state_dir: Path | None = None, log_calls: 
             try:
                 receipt.update(client.dmf_status(receipt["execution_id"], download, max_chars=max_chars))
             except Outcome as error:
-                receipt["status_error"] = mask_error(error.as_dict(), omit_all_urls=True)
+                receipt["status_error"] = mask_error(error.as_data(), omit_all_urls=True)
         elif receipt["state"] == "submitted" and download:
             receipt["download_note"] = "No download attempted: the import ran with execute=false, so no execution ran"
         return receipt
@@ -299,7 +299,7 @@ def main(argv: list[str] | None = None) -> None:
                                  call_budget=config.call_limit, **(auth or {}))
         config.serve(make_server)
     except Outcome as outcome:
-        print(json.dumps(mask_error(outcome.as_dict())), file=sys.stderr)
+        print(json.dumps(mask_error(outcome.as_data())), file=sys.stderr)
         raise SystemExit(2) from None
     except (OSError, ValueError, KeyError, TypeError) as error:
         print(json.dumps(mask_error({"status": "failed", "code": "config", "message": str(error)})), file=sys.stderr)

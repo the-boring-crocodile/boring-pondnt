@@ -69,7 +69,7 @@ def test_whs_log_tail_and_unknown_worker(tmp_path):
     error, outcome = call(server, "whs_log", {"worker": "NOBODY"})
     assert error and outcome["code"] == "not_found"
     error, outcome = call(server, "whs_log", {"worker": "WHSAPP01", "lines": 0})
-    assert error and outcome["code"] == "refused"
+    assert error and outcome["code"] == "invalid_request"
 
 
 def test_size_cap_keeps_one_old_file(tmp_path, monkeypatch):

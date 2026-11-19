@@ -69,6 +69,155 @@ def test_entities_and_metadata_cache():
     assert metadata_calls[0][4]["max_bytes"] == 128 * 1024 * 1024
 
 
+def test_concurrent_warm_queries_succeed_while_metadata_lock_is_held():
+    from concurrent.futures import ThreadPoolExecutor
+    import threading
+
+    fake = Fake()
+    client = make(fake)
+    client.metadata()
+    fake.calls.clear()
+    together = threading.Barrier(3)
+    def query():
+        together.wait(timeout=2)
+        return client.query("Customers")
+    with ThreadPoolExecutor(max_workers=3) as threads:
+        with client._metadata_lock:
+            calls = [threads.submit(query) for _ in range(3)]
+            results = [call.result(timeout=2) for call in calls]
+    assert all(result["rows"] == [{"Account": "A1"}] for result in results)
+    assert len(fake.calls) == 3
+    assert not any(call[0].endswith("/data/$metadata") for call in fake.calls)
+
+
+def test_cold_metadata_load_answers_busy_then_uses_the_warm_cache():
+    from concurrent.futures import ThreadPoolExecutor
+    import threading
+
+    fake = Fake()
+    loading, release = threading.Event(), threading.Event()
+    def transport(url, *args, **kwargs):
+        if url.endswith("/data/$metadata"):
+            loading.set()
+            assert release.wait(5), "test did not release the cold load"
+        return fake(url, *args, **kwargs)
+    client = make(transport)
+    with ThreadPoolExecutor(max_workers=2) as threads:
+        cold = threads.submit(client.entities)
+        try:
+            assert loading.wait(1)
+            waiting = threads.submit(client.query, "Customers")
+            error = waiting.exception(timeout=1)
+            assert isinstance(error, Refused) and error.code == "busy"
+            assert error.message == "Loading D365 metadata; retry in a few seconds."
+            assert not any("/data/Customers" in call[0] for call in fake.calls)
+        finally:
+            release.set()
+        cold.result(timeout=2)
+    assert client.query("Customers")["rows"] == [{"Account": "A1"}]
+    assert len([call for call in fake.calls if call[0].endswith("/data/$metadata")]) == 1
+
+    # A metadata HTTP timeout aborts this load. Keep busy, but distinguish it
+    # from an active concurrent load; the next call starts a fresh attempt.
+    def expired(url, *args, **kwargs):
+        if url.endswith("/data/$metadata"):
+            raise TimeoutError("cold metadata exceeded the request budget")
+        return fake(url, *args, **kwargs)
+    cold_client = make(expired)
+    with pytest.raises(Refused) as caught:
+        cold_client.entities()
+    assert caught.value.code == "busy"
+    assert caught.value.message == ("D365 metadata did not load within the call budget "
+                                    "(D365 may still be warming up); retry in a few seconds.")
+    cold_client.transport = fake
+    assert cold_client.query("Customers")["rows"] == [{"Account": "A1"}]
+
+
+@pytest.fixture
+def data_clock(monkeypatch):
+    from types import SimpleNamespace
+    import boring_pondnt.d365data_client as data
+    import boring_pondnt.d365_entra as entra
+
+    now = [100.0]
+    clock = SimpleNamespace(monotonic=lambda: now[0])
+    monkeypatch.setattr(data, "time", clock)
+    monkeypatch.setattr(entra, "time", clock)
+    return now
+
+
+def test_cold_and_warm_reads_share_one_token_metadata_dispatch_budget(data_clock):
+    class Timed(Fake):
+        def __call__(self, url, *args, **kwargs):
+            result = super().__call__(url, *args, **kwargs)
+            if "login.microsoftonline.com" in url:
+                data_clock[0] += 0.5
+            elif url.endswith("/$metadata"):
+                data_clock[0] += 1
+            return result
+
+    fake = Timed()
+    client = make(fake, timeout=3)
+    assert client.query("Customers")["rows"] == [{"Account": "A1"}]
+    assert [call[3] for call in fake.calls] == [3, 2.5, 1.5]
+    fake.calls.clear()
+    client.tokens._expires = 0  # the warm metadata call needs a fresh token
+    with client._metadata_lock:
+        assert client.query("Customers")["rows"] == [{"Account": "A1"}]
+    assert [call[3] for call in fake.calls] == [3, 2.5]
+    assert not any(call[0].endswith("/$metadata") for call in fake.calls)
+
+
+@pytest.mark.parametrize("phase", ["metadata", "parse"])
+@pytest.mark.parametrize("tool,args", [
+    ("odata_entities", {}),
+    ("odata_query", {"entity": "Customers"}),
+    ("odata_write", {"entity": "Customers", "op": "create", "values": {"Account": "fixture"}}),
+    ("odata_action", {"entity": "Customers", "action": "FixtureAction"}),
+])
+def test_cold_odata_expiry_sends_no_business_request(tmp_path, monkeypatch, data_clock, phase, tool, args):
+    import boring_pondnt.d365data_client as data
+
+    class Timed(Fake):
+        def __call__(self, url, *args, **kwargs):
+            result = super().__call__(url, *args, **kwargs)
+            if phase == "metadata" and url.endswith("/$metadata"):
+                data_clock[0] += 4
+            return result
+
+    fake = Timed()
+    client = make(fake, timeout=3)
+    parse = data.ET.fromstring
+    def slow_parse(text):
+        result = parse(text)
+        if phase == "parse":
+            data_clock[0] += 4
+        return result
+    monkeypatch.setattr(data.ET, "fromstring", slow_parse)
+    error, result = invoke(create_server(client, tmp_path, call_budget=8), tool, args)
+    assert error and result["status"] == "refused" and result["code"] == "not_admitted"
+    assert all("login.microsoftonline.com" in call[0] or call[0].endswith("/$metadata")
+               for call in fake.calls)
+    # Successful metadata parsing is kept; a retry need not fetch the schema again.
+    assert client._metadata is not None and not client._metadata_lock.locked()
+
+
+def test_write_expiring_during_payload_preparation_sends_nothing(data_clock, monkeypatch):
+    fake = Fake()
+    client = make(fake, timeout=3)
+    client.metadata()
+    fake.calls.clear()
+    encode = client._body
+    def slow_body(value):
+        data_clock[0] += 4
+        return encode(value)
+    monkeypatch.setattr(client, "_body", slow_body)
+    with pytest.raises(Refused) as error:
+        client.write("Customers", "create", values={"Account": "fixture"})
+    assert error.value.code == "timeout"  # existing token-stage refusal, before any dispatch
+    assert fake.calls == []
+
+
 def test_query_company_filter_is_escaped_and_cross_company():
     fake = Fake()
     client = make(fake)
@@ -261,7 +410,7 @@ def test_odata_errors_keep_messages_without_stack_frames(status, error, expected
     server = create_server(make(fake), tmp_path)
     is_error, outcome = invoke(server, "odata_query", {"entity": "Customers"})
     assert is_error and outcome["code"] == "d365_error"
-    assert outcome["details"]["http_status"] == status
+    assert outcome["http_status"] == status
     prefix, body = outcome["message"].split(": ", 1)
     assert prefix == f"D365 returned HTTP {status}"
     assert json.loads(body) == expected
@@ -371,7 +520,8 @@ def test_entra_http_failure_exposes_only_diagnostic_fields(tmp_path):
     server = create_server(make(lambda *args, **kwargs: Response(401, json.dumps(response))), tmp_path)
     error, result = invoke(server, "odata_query", {"entity": "Customers"})
     assert error and result["code"] == "token_failed"
-    assert result["details"] == {"error": "invalid_client", "error_codes": [7000215, 70002]}
+    assert result["error"] == "invalid_client" and result["error_codes"] == [7000215, 70002]
+    assert set(result) == {"status", "code", "message", "error", "error_codes"}
     assert result["message"] == ("Entra token request: HTTP 401: invalid_client: "
                                  "AADSTS7000215: invalid credential for [ID omitted] Bearer ***")
 
@@ -959,7 +1109,7 @@ def test_an_etag_makes_the_write_conditional_and_a_changed_record_a_conflict():
     fake = Fake()
     client = make(fake)
     fake.query_reply = Response(412, "")
-    with pytest.raises(Failed) as caught:
+    with pytest.raises(Refused) as caught:
         client.write("Customers", "update", key={"Account": "A"}, values={"Name": "N"}, company="usmf",
                      etag='W/"JzEsNTYzNzE0NDU3Nyc="')
     assert caught.value.code == "conflict"

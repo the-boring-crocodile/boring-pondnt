@@ -13,25 +13,28 @@ whatever the agent reads as able to steer it.**
 
 ## The callers
 
-Every MCP server listens on 127.0.0.1 only and refuses a call without a
-valid access key (`Authorization: Bearer bsk_...`). A key belongs to one
-server and one person, and lives 365 days; running setup with fewer than 30
-left renews it.
+The normal desktop install listens on 127.0.0.1 and requires an access key
+(`Authorization: Bearer bsk_...`) for every MCP call. Setup keys belong to one
+server and person, with a fixed 100-year technical expiry. Reruns retain them;
+only explicit `-RotateKeys` replaces the selected bearers. The separate
+[Pond tunnel](DEVBOX_TUNNEL.md) has its own server instances and credentials.
 
-Two additional loopback surfaces sit outside the MCP bearer-key check:
+Two loopback surfaces use different checks from MCP:
 
-- **Canvas's web page** (port 18510) opens with a token in its URL, the
-  link the Canvas tools hand out; whoever has the link sees and edits that
-  canvas.
+- **Canvas's web page** shares port 18511 with Canvas MCP. It opens with a
+  browser token in the link the Canvas tools hand out. Whoever has the link
+  can view and edit that canvas. Canvas MCP still checks a bearer key.
 - **The d365web browser's debugging port** (`debug_port` in `d365web.json`,
   9333 in the examples; form-mode d365whsapp normally uses 9334) has no authentication at all. While that Edge runs,
   any local program can drive the signed-in D365 session through it, as
   that user. Close the browser (`web_close`, or `idle_minutes`) when it is
   not needed.
 
-- **Where keys are.** The plain keys are in `%USERPROFILE%\.mcp.json`
-  (and, for services behind the gateway, in its `<service>.headers.json`),
-  in your own profile. Each server's `keys.json` stores only a fingerprint.
+- **Where keys are.** Each service's private `client.headers.json` in your
+  profile owns its bearer. Direct `.mcp.json` entries copy it; Ferry references
+  that same file. A `.mcp.json.bak-*` copy can keep active bearer keys after
+  setup or uninstall. Keep those copies private too. The configured key file
+  (normally `keys.json`) stores only fingerprints.
   Anyone who can read your profile can call the servers as you; so can any
   program running as you.
 - **Roles.** A server knows two roles: `reader` (status, results, xref,
@@ -56,7 +59,7 @@ Two additional loopback surfaces sit outside the MCP bearer-key check:
 | d365 | you, elevated | build, sync (module or full), best practice, `d365_run` (any d365fo.tools command, including stopping and restarting the environment), `d365_sql` (any statement on any local database, with your Windows login) |
 | d365web, d365whsapp | you, elevated | act in D365 as the signed-in user or warehouse worker |
 | d365data | you, elevated | read and change OData entities and run DMF packages with the permissions of the configured Entra app's mapped D365 user |
-| Sourcecache, Knowledge, Canvas, gateway | SYSTEM | search the index; write notes and drawings; reach the services behind the gateway with their keys |
+| Sourcecache, Knowledge, Canvas, gateway | you, ordinary token | search the index; write notes and drawings; reach the services behind the gateway with their keys |
 
 These are your rights, used by an agent. On a dev box they are what the
 work needs. On a box whose D365 talks to production data or other people's
@@ -67,19 +70,19 @@ environment, they are a production change without review.
 - Loopback only; a key for every MCP call (the two doors above excepted);
   role checks per call, with the core credential-disclosure limit above.
 - No argument text in the call log ([FOUNDATION_SPEC](FOUNDATION_SPEC.md#call-log)).
-- The release folder: only administrators and SYSTEM may change it (and
-  its owner, who can always change permissions; normally that is the
-  administrator who unpacked it), because its Python runs as SYSTEM and
-  elevated. setup sets this and checks every file below it
-  ([INSTALL](INSTALL.md#1-download-check-and-unpack)).
+- Exact person/logon task definitions are checked before replacement or
+  removal. A matching name alone is not ownership. Setup stops only checked
+  Scheduler tasks and waits for configured ports; it never kills a listener
+  to make room. Startup checks task state and listeners, not tool behavior.
 - Bounded calls: timeouts, row limits, result sizes; a lost reply is
   reported as unknown, never resent blindly.
 
-General services remain SYSTEM boot tasks. The release-folder lockdown
-protects their executable payload; it does not make their profile-based
-configuration immutable. Core and the D365 backends are interactive logon
-tasks. A gateway that starts at boot cannot make them available before the
-developer logs on.
+Every normal service starts at the person's desktop logon. Core and the four
+D365 servers request elevation. No normal service runs as SYSTEM or starts
+before someone signs in. Install under `C:\Program Files\pondNT\<version>`
+with administrator-controlled permissions. Setup reports potential write
+grants or unchecked paths and continues; it never changes ACLs or ownership
+and does not establish safe parent directories ([INSTALL](INSTALL.md#1-download-check-and-unpack)).
 
 ## What it deliberately does not
 
@@ -103,12 +106,11 @@ developer logs on.
 - **The model.** Whatever the agent reads (source, a work item, a web page,
   the database) can contain instructions, and the agent may follow them with
   your rights. pondNT cannot tell a good instruction from a planted one.
-- **Your profile.** The SYSTEM services read their configuration and state
-  from your `%LOCALAPPDATA%\boring-pondnt`. A program running as you, not
-  elevated, can change those files; that is a path from your unelevated
-  session to code that runs as SYSTEM. Windows does not treat that step
-  (UAC) as a security boundary, and neither do we; on a box where it
-  matters, nobody untrusted runs as you.
+- **Your profile.** Services read settings and credentials from your
+  `%LOCALAPPDATA%\boring-pondnt`; elevated core and D365 tasks use that same
+  profile. A program running as you can change those files or read the keys
+  and call the elevated core. UAC is not an isolation boundary here; nobody
+  untrusted should run as you on this box.
 - **Defender.** The optional exclusion stops scanning what pondNT's Python
   opens ([INSTALL, step 2](INSTALL.md#2-defender-optional----dangerous-read-first)).
 
@@ -123,8 +125,7 @@ release:
 - environment allowlists, target-identity checks and destructive-operation guards;
 - starting the core and D365 backends without the developer's logon.
 
-The standard installer keeps SYSTEM for general services. A dedicated D365
-browser test user is optional and signed in per profile
+A dedicated D365 browser test user is optional and signed in per profile
 ([browser setup](D365WEB.md#setup)); it does not constrain core command access.
 SQL advice or a restricted tool alone cannot constrain a caller that also
 has arbitrary elevated execution.

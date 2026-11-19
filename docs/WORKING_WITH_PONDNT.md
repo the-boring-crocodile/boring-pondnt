@@ -116,9 +116,9 @@ depend on the client and task. Ferry forwards calls; each backend still
 owns its process, permissions and results.
 
 Start with the [installer's preview](INSTALL.md#the-short-way-setupps1),
-using `-Gateway all` and the complete service selection you intend to run.
-Configure browser and warehouse backends explicitly; the gateway flag does
-not enable them by itself. After installation, bootstrap core, inspect the
+Setup reads existing services and the Sourcecache index from their owned tasks;
+a fresh Sourcecache install needs -Index. Core and Knowledge stay direct, and
+all specialist services use Ferry. Prepare opt-in settings before adding a service. After installation, bootstrap core, inspect the
 available services and try the read-only browser check above.
 
 The standard installer creates scheduled tasks. Where a host deliberately
@@ -207,9 +207,10 @@ from a Linux Pond. Both need access to the same D365 development environment,
 without replacing each other's connection.
 
 Keep the local core/Knowledge/Ferry setup. Add the tunnel route for the
-remote Pond. The supplied tunnel helper starts **separate service endpoints**
-with their own identities, ports and process records alongside the local
-installation. It does not forward the existing local Ferry automatically.
+remote Pond. The separate tunnel window starts **independent service endpoints**
+with their own identities, settings, ports and state alongside the local
+installation. Closing it ends those children; SSH reconnects inside the window.
+It does not forward the existing local Ferry automatically.
 Both routes can act on the same underlying files and D365 instance.
 
 <picture>

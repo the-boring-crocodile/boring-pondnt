@@ -57,11 +57,11 @@ def test_job_is_not_terminal_until_cleanup_finishes(tmp_path):
     try:
         assert entered.wait(2)
         assert manager.status(job.job_id)["state"] == "stopping"
-        assert not manager.wait([job.job_id], 0)["all_ended"]
+        assert not manager.wait([job.job_id], 0)["settled"]
         release.set()
         watcher.join(3)
         assert not watcher.is_alive()
-        assert job.state == "stopped" and job.done.is_set()
+        assert job.state == "cancelled" and job.done.is_set()
     finally:
         release.set()
         watcher.join(3)

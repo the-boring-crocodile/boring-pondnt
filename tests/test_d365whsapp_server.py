@@ -72,9 +72,10 @@ def test_refusals_and_failures(tmp_path):
     call(server, "whs_login", {"worker": "WHSAPP01", "password": "1"})
     error, outcome = call(server, "whs_submit", {"worker": "WHSAPP01", "values": {"Main": "x"}})
     assert error and outcome["status"] == "refused" and "not an input field" in outcome["message"]
-    assert outcome["details"]["page"]["page"] == "Menu"
+    assert outcome["page"]["page"] == "Menu"
     error, outcome = call(server, "whs_submit", {"worker": "WHSAPP01", "press": "Inbound"})
-    assert error and outcome["status"] == "failed" and outcome["code"] == "REQUEST_XML_TAMPERING"
+    assert error and outcome["status"] == "failed" and outcome["code"] == "upstream_error"
+    assert outcome["vendor_code"] == "REQUEST_XML_TAMPERING"
 
 
 def test_scenario_with_expectations(tmp_path):
@@ -277,7 +278,7 @@ class FakeWeb:
     def whs_login(self, worker, password, company=None):
         if password == "wrong":
             from boring_pondnt.d365web_client import D365WebError
-            raise D365WebError("login_failed", "login refused")
+            raise D365WebError("login_failed", "login refused", status='failed')
         self.whs_tabs[worker.upper()] = object()
         return self._next("login", worker, company)
 

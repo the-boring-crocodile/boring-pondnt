@@ -57,6 +57,8 @@ def batches(script: str) -> list[str]:
 
 def cell(value: Any) -> Any:
     """A value as JSON: exact decimals as text, times in ISO form, binary as hex, long text cut."""
+    if isinstance(value, float) and not math.isfinite(value):
+        return str(value)  # JSON has no NaN/infinity; retain the SQL value as text.
     if value is None or isinstance(value, (bool, int, float)):
         return value
     if isinstance(value, decimal.Decimal):

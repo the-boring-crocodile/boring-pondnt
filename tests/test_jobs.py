@@ -24,9 +24,9 @@ def test_start_wait_status_output(jobs):
     started = jobs.start("i=1; while [ $i -le 300 ]; do echo line$i; i=$((i+1)); done; echo oops >&2; exit 2")
     assert started["state"] == "running" and len(started["job_id"]) == 32
     waited = jobs.wait([started["job_id"]], 10)
-    assert waited["all_ended"]
+    assert waited["settled"]
     status = waited["jobs"][0]
-    assert status["state"] == "exited" and status["exit_code"] == 2
+    assert status["state"] == "completed" and status["exit_code"] == 2
     tail = jobs.output(started["job_id"], tail_lines=3)
     assert tail["content"] == "line298\nline299\nline300\n"
     assert tail["start_line"] == 298 and tail["total_lines"] == 300
@@ -38,14 +38,14 @@ def test_start_wait_status_output(jobs):
 def test_wait_returns_after_wait_seconds_when_still_running(jobs):
     job = jobs.start("sleep 30")
     waited = jobs.wait([job["job_id"]], 0.3)
-    assert not waited["all_ended"] and waited["jobs"][0]["state"] == "running"
+    assert not waited["settled"] and waited["jobs"][0]["state"] == "running"
 
 
 def test_timeout_kills_the_tree(jobs, tmp_path):
     pidfile = tmp_path / "child.pid"
     job = jobs.start(f"sleep 30 & echo $! > {pidfile}; sleep 30", timeout_seconds=0.5)
     status = jobs.wait([job["job_id"]], 10)["jobs"][0]
-    assert status["state"] == "timed_out" and status["exit_code"] is None
+    assert status["state"] == "completed" and status["exit_code"] is None
     assert wait_dead(int(pidfile.read_text()))
 
 
@@ -54,9 +54,9 @@ def test_stop_kills_the_tree(jobs, tmp_path):
     job = jobs.start(f"sleep 30 & echo $! > {pidfile}; sleep 30")
     jobs.wait([job["job_id"]], 0.3)
     stopped = jobs.stop(job["job_id"])
-    assert stopped["state"] == "stopped"
+    assert stopped["state"] == "cancelled"
     assert wait_dead(int(pidfile.read_text()))
-    assert jobs.stop(job["job_id"])["state"] == "stopped"  # stopping again is harmless
+    assert jobs.stop(job["job_id"])["state"] == "cancelled"  # stopping again is harmless
 
 
 def test_shutdown_kills_running_jobs(tmp_path):
@@ -65,7 +65,7 @@ def test_shutdown_kills_running_jobs(tmp_path):
     job = manager.start(f"echo $$ > {pidfile}; sleep 30")
     manager.wait([job["job_id"]], 0.3)
     manager.shutdown()
-    assert manager.status(job["job_id"])["state"] == "stopped"
+    assert manager.status(job["job_id"])["state"] == "cancelled"
     assert wait_dead(int(pidfile.read_text()))
 
 
@@ -105,6 +105,6 @@ def test_a_job_whose_output_passes_the_cap_is_stopped(tmp_path, monkeypatch):
         started = manager.start("yes x", timeout_seconds=30)
         result = manager.wait([started["job_id"]], 10)
         status = result["jobs"][0]
-        assert result["all_ended"] and "output passed" in (status.get("error") or "")
+        assert result["settled"] and "output passed" in (status.get("error") or "")
     finally:
         manager.shutdown()

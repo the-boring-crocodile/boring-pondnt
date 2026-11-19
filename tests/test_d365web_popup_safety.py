@@ -65,7 +65,7 @@ def test_combo_with_no_list_sends_no_escape():
     client, page, state = combo("never")
     with pytest.raises(D365WebError) as caught:
         client._pick_combo(page, {"x": 1, "y": 2}, "Choice", "Two", [])
-    assert caught.value.code == "refused" and caught.value.details["options"] == []
+    assert caught.value.code == "not_found" and caught.value.details["options"] == []
     assert state.keys == ["Alt+ArrowDown"]
 
 

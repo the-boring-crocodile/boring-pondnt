@@ -87,23 +87,20 @@ def test_bootstrap_names_the_release_kit_when_serving_another(tmp_path, monkeypa
     assert "release_handbook" not in bootstrap_result(root / "handbook")
 
 
-def test_an_old_kit_install_is_refused_before_any_write_and_left_as_it_is(tmp_path):
-    """Before the handbook the state folder held `kit`; this release does not migrate it."""
-    root, state = release(tmp_path, 'new'), tmp_path / 'state'
-    legacy = state / 'kit'
+@pytest.mark.parametrize("existing_handbook", [False, True])
+def test_retired_kit_folder_does_not_affect_the_current_handbook(tmp_path, existing_handbook):
+    root, state = release(tmp_path, "new"), tmp_path / "state"
+    legacy = state / "kit"
     legacy.mkdir(parents=True)
-    (legacy / 'bootstrap.md').write_bytes(b'# owner\r\n')
-    for extra in ((), ('handbook',)):
-        for name in extra:
-            (state / name).mkdir(exist_ok=True)
-        for apply in (False, True):
-            result = setup(root, state, apply=apply)
-            assert result['handbook']['state'] == 'old-kit' and result['handbook']['legacy'] == str(legacy)
-            assert not result['services']
-            assert any('-Uninstall' in c and 'move that folder aside' in c for c in result['conflicts'])
-            assert (legacy / 'bootstrap.md').read_bytes() == b'# owner\r\n'
-            assert 'kit' not in result
-    assert sorted(p.name for p in state.iterdir()) == ['handbook', 'kit']
+    (legacy / "bootstrap.md").write_bytes(b"# old owner\r\n")
+    if existing_handbook:
+        (state / "handbook").mkdir()
+        (state / "handbook/bootstrap.md").write_text("# current owner\n")
+    for apply in (False, True):
+        result = setup(root, state, apply=apply)
+        assert result["services"] and not result["conflicts"]
+        assert result["handbook"]["folder"] == str(state / "handbook")
+        assert (legacy / "bootstrap.md").read_bytes() == b"# old owner\r\n"
 
 
 def test_bootstrap_has_handbook_names_only(tmp_path):

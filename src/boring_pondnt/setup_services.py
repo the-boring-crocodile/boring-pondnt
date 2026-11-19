@@ -1,37 +1,10 @@
-"""The general services on this one machine, reached with access keys.
+"""Prepare normal desktop services, preserving operator settings and credentials.
 
-setup.ps1 asks; this module prepares. For each wanted service it writes the
-service config (loopback HTTP, keys only) next to a key file, makes or keeps
-the user's key, and answers with what setup.ps1 still has to do: the
-scheduled task's command line and the `.mcp.json` entry.
-
-    python -m boring_pondnt.setup_services --root <release> --state <dir> --index <db>
-        [--only sourcecache,knowledge,canvas,core] [--gateway keep|none|all|d365,...] [--plan]
-        < .mcp.json servers  > plan JSON
-
-The core and the D365 server are set up the same way, with one difference: their tasks run as the
-person at logon, not as SYSTEM at boot, because Copilot's commands run in them
-and must run as that person (their profile, git credentials, PATH; d365fo.tools elevated).
-
-`--plan` changes nothing. Without it the config and key files are written; a
-key is rotated only when the entry in `.mcp.json` does not hold a valid one.
-Keys never leave this process except inside the returned entry.
-
-The gateway (optional, DECISIONS D41): `--gateway` puts chosen services behind one
-`.mcp.json` entry, boring-gateway, a boring-mcp-ferry with four tools (service_list,
-service_describe, service_read, service_call) instead of every service's own. A
-gated service keeps its task, port and key; the key goes into a headers file in the
-gateway's folder instead of an `.mcp.json` entry, and its direct entry is removed.
-The core and Knowledge always stay direct. `keep` (the default) keeps whatever is
-behind the gateway now; `none` takes everything back out and retires the gateway.
-
-The kit: the core serves `<state>/handbook`, not the release's
-`handbook/`. Setup copies the release's kit there once, when that folder does not
-exist, and never writes to it again. Later releases report missing and changed
-pages for the owner to review. Ferry can serve a missing guide from the release.
-Uninstall keeps the person's handbook.
-An old install's `<state>/kit` (before the handbook) is not migrated: setup refuses
-and says how to reinstall (Wald, 2026-10-30).
+Create config.json once, with a one-time legacy keys upgrade.
+Generate the fixed gateway from the owned task scope.
+Each service owns client.headers.json, used by both .mcp.json and Ferry.
+Reruns repair generated output with the same bearer; only --rotate-keys
+replaces it. Uninstall retains configuration, keys, data and the handbook.
 """
 from __future__ import annotations
 
@@ -46,12 +19,13 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from boring_service_kit import keys
+from boring_service_kit.filelock import file_lock
 from . import disk
 
-LOCAL_DAYS = 365          # renewed by running setup again; the servers listen on 127.0.0.1 only
-RENEW_BELOW_DAYS = 30
+LOCAL_DAYS = 36525        # fixed 100-year technical expiry; no automatic renewal
 LABEL = "pondnt setup"
 
 
@@ -61,7 +35,6 @@ class Service:
     short: str            # folder and key issuer suffix
     module: str
     port: int
-    account: str = "system"  # "system": SYSTEM at boot; "user": the person at logon
 
     @property
     def url(self) -> str:
@@ -72,17 +45,17 @@ SERVICES = {
     "sourcecache": Service("boring-sourcecache", "sourcecache", "boring_sourcecache_d365.server", 18501),
     "knowledge": Service("boring-knowledge", "knowledge", "boring_knowledge.server", 18512),
     "canvas": Service("boring-canvas", "canvas", "boring_canvas.server", 18511),
-    "core": Service("boring-pondnt", "core", "boring_pondnt.server", 18513, account="user"),
+    "core": Service("boring-pondnt", "core", "boring_pondnt.server", 18513),
     # like the core -- the person's account, elevated (d365fo.tools needs administrator rights).
-    "d365": Service("boring-d365", "d365", "boring_pondnt.d365_server", 18514, account="user"),
+    "d365": Service("boring-d365", "d365", "boring_pondnt.d365_server", 18514),
     # Opt-in (not in DEFAULT_ONLY): needs an Entra app and d365whsapp.json in its folder (docs/D365WHSAPP.md).
     # The person's account: the client secret is DPAPI-protected for them.
-    "d365whsapp": Service("boring-d365whsapp", "d365whsapp", "boring_pondnt.d365whsapp_server", 18515, account="user"),
+    "d365whsapp": Service("boring-d365whsapp", "d365whsapp", "boring_pondnt.d365whsapp_server", 18515),
     # Opt-in: drives a signed-in Edge profile of the person (docs/D365WEB.md), so the person's account too.
-    "d365web": Service("boring-d365web", "d365web", "boring_pondnt.d365web_server", 18516, account="user"),
+    "d365web": Service("boring-d365web", "d365web", "boring_pondnt.d365web_server", 18516),
     # Opt-in: its own Entra app; the secret is DPAPI-protected for the person (docs/D365DATA.md).
-    "d365data": Service("boring-d365data", "d365data", "boring_pondnt.d365data_server", 18518, account="user"),
-    # Only with --gateway: never in --only. SYSTEM at boot like the services; it calls them on loopback.
+    "d365data": Service("boring-d365data", "d365data", "boring_pondnt.d365data_server", 18518),
+    # Only with the gateway selected: it calls the other services on loopback.
     "gateway": Service("boring-gateway", "gateway", "boring_mcp_ferry.server", 18517),
 }
 GATEWAY = "gateway"
@@ -95,8 +68,76 @@ WHSAPP_CONFIG = "d365whsapp.json"
 OPT_IN_CONFIGS = {"d365whsapp": (WHSAPP_CONFIG, "docs/D365WHSAPP.md"),
                   "d365web": ("d365web.json", "docs/D365WEB.md"),
                   "d365data": ("d365data.json", "docs/D365DATA.md")}
-CANVAS_WEB_PORT = 18510
 KIT = "handbook"
+
+
+def read_settings(path: Path) -> dict[str, Any]:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError) as error:
+        raise ValueError(f"{path}: cannot read settings ({type(error).__name__})") from None
+    if not isinstance(value, dict):
+        raise ValueError(f"{path}: expected a JSON object")
+    return value
+
+
+def service_settings(service: Service, state: str, *,
+                     migrations: dict[Path, tuple[dict[str, Any], disk.Version]] | None = None) -> dict[str, Any]:
+    path = Path(state) / "services" / service.short / "config.json"
+    if not path.exists():
+        return {"url": service.url, "bind": "127.0.0.1", "port": service.port,
+                "mode": "keys", "keys": {"file": "keys.json"}}
+    value = read_settings(path)
+    from boring_service_kit.http import ServiceConfig
+    legacy = (set(value) == {"url", "bind", "port", "keys"}
+              and isinstance(value["keys"], dict) and set(value["keys"]) == {"file"})
+    if legacy and migrations is not None:
+        raw, source = disk.read_version(path, 512 * 1024)
+        if json.loads(raw.decode("utf-8-sig")) != value:
+            raise ValueError(f"{path}: changed during setup; inspect and retry")
+    try:
+        if legacy:
+            value["mode"] = "keys"
+            info = ServiceConfig.inspect_value(value, path)
+        else:
+            info = ServiceConfig.inspect(path)
+    except (KeyError, TypeError, ValueError) as error:
+        raise ValueError(f"{path}: {error}") from None
+    url = urlsplit(info.url)
+    mcp_path = url.path.endswith("/mcp") if service.short == "canvas" else url.path == "/mcp"
+    if not (info.bind == "127.0.0.1" and url.scheme == "http"
+            and url.hostname == "127.0.0.1" and url.port == info.port and mcp_path):
+        raise ValueError(f"{path}: use a loopback HTTP /mcp URL and matching port (edit both together)")
+    if legacy and migrations is not None:
+        migrations[path] = (value, source)
+    return value
+
+
+def service_keyfile(service: Service, state: str) -> Path:
+    """Use the operator's keys reference, just as the service does."""
+    config = Path(state) / "services" / service.short / "config.json"
+    value = service_settings(service, state).get("keys")
+    if not isinstance(value, dict) or set(value) != {"file"}:
+        raise ValueError(f"{config}: setup needs keys with exactly file")
+    from boring_service_kit.http import ServiceConfig
+    return ServiceConfig.file(config, value["file"], "keys file")
+
+
+def check_config_ports(state: str, selected: list[str]) -> dict[Path, tuple[dict[str, Any], disk.Version]]:
+    """Read selected and already configured listeners before any installation effects."""
+    ports: dict[int, str] = {}
+    migrations: dict[Path, tuple[dict[str, Any], disk.Version]] = {}
+    for short, service in SERVICES.items():
+        config = Path(state) / "services" / short / "config.json"
+        if short not in selected and not config.exists():
+            continue
+        value = service_settings(service, state, migrations=migrations)
+        listeners = [(value.get("port", urlsplit(value["url"]).port), str(config))]
+        for port, filename in listeners:
+            if port in ports:
+                raise ValueError(f"{filename}: port {port} is also used by {ports[port]}")
+            ports[port] = filename
+    return migrations
 
 
 def kit_folder(state: str) -> str:
@@ -122,9 +163,7 @@ def arguments(service: Service, folder: str, index: str, state: str) -> list[str
     # --unsafe-url-auth: over MCP the canvas link is the only way a person gets the canvas token
     # (create_canvas returns open_url); a Pond's Canvas can run the same way. Here nothing but this
     # machine sees the link: no proxy log, loopback only (found missing on a dev VM).
-    return ["--config", config, "--state-dir", os.path.join(folder, "state"), "--host", "127.0.0.1",
-            "--port", str(CANVAS_WEB_PORT), "--public-base-url", f"http://127.0.0.1:{CANVAS_WEB_PORT}",
-            "--unsafe-url-auth"]
+    return ["--config", config, "--state-dir", os.path.join(folder, "state"), "--unsafe-url-auth"]
 
 
 def gateway_folder(state: str) -> Path:
@@ -132,55 +171,88 @@ def gateway_folder(state: str) -> Path:
 
 
 def headers_file(state: str, short: str) -> Path:
-    return gateway_folder(state) / f"{short}.headers.json"
+    return Path(state) / "services" / short / "client.headers.json"
 
 
-def gated_now(state: str) -> list[str]:
-    """The services behind the gateway as installed (its ferry.json); none when there is none."""
+def read_bearer(path: Path) -> str:
+    value = read_settings(path)
+    token = held_key({"headers": value})
+    if set(value) != {"Authorization"} or token is None:
+        raise ValueError(f"{path}: expected a bearer Authorization header; inspect private credentials")
+    return token
+
+
+def credential(service: Service, state: str, entry: Any, subject: str,
+               now: float, rotate: bool, apply: bool) -> tuple[str | None, bool]:
+    """Persist the bearer before its hash; rerun repairs the same pair.
+
+    The header file owns the bearer after creation. Legacy imports must match
+    an accepted setup key. Other subjects/labels in keys.json are retained.
+    Callers hold the key-file lock across read, header publication and save.
+    """
+    path = headers_file(state, service.short)
+    keyfile = service_keyfile(service, state)
     try:
-        data = json.loads((gateway_folder(state) / FERRY).read_text(encoding="utf-8"))
-    except FileNotFoundError:
-        return []
-    except ValueError:  # not JSON: say which file, not the decoder's position alone
-        raise ValueError("Invalid installed gateway configuration; inspect ferry.json before changing setup") from None
-    backends = data.get("backends") if isinstance(data, dict) else None
-    if not isinstance(backends, dict) or any(s not in SERVICES or s in NEVER_GATED for s in backends):
-        raise ValueError("Invalid installed gateway configuration; inspect ferry.json before changing setup")
-    return list(backends)
+        current = keys.KeyFile.load(keyfile) if keyfile.exists() else keys.KeyFile(
+            f"key:{subject.rsplit('@', 1)[1]}-{service.short}", ())
+    except (OSError, ValueError) as error:
+        raise ValueError(f"{keyfile}: cannot read accepted keys ({type(error).__name__})") from None
+    owned_keys = [k for k in current.keys if k.subject == subject and k.label == LABEL]
+    if path.exists():
+        token = read_bearer(path)
+    else:
+        candidates = []
+        direct = held_key(entry)
+        legacy = gateway_folder(state) / f"{service.short}.headers.json"
+        if direct:
+            candidates.append(direct)
+        if legacy.exists():
+            candidates.append(read_bearer(legacy))
+        if len(set(candidates)) > 1:
+            raise ValueError(f"{path}: conflicting legacy credentials; inspect before setup")
+        token = candidates[0] if candidates else None
+        if token and not any(k.sha256 == keys.fingerprint(token) for k in owned_keys):
+            raise ValueError(f"{keyfile}: legacy bearer does not match an accepted setup key")
+        if token is None and owned_keys and not rotate:
+            raise ValueError(f"{path}: missing bearer for existing setup keys; restore it or use -RotateKeys")
+    found = next((k for k in current.keys if token and k.sha256 == keys.fingerprint(token)), None)
+    if found and (found.subject != subject or found.label != LABEL or found.role != "writer"):
+        raise ValueError(f"{keyfile}: bearer belongs to a different grant; inspect private credentials")
+    if found and found.expires <= now and not rotate:
+        raise ValueError(f"{keyfile}: setup key expired; use -RotateKeys")
+    new_key = rotate or token is None
+    if not apply:
+        return token, new_key
+    if new_key:
+        token = keys.new_key()
+        found = None
+    if not path.exists() or rotate:
+        write_private(path, {"Authorization": f"Bearer {token}"})
+    if found is None:
+        created = int(now)
+        accepted = keys.Key("k" + keys.fingerprint(token)[:16], keys.fingerprint(token),
+                            subject, "writer", created + LOCAL_DAYS * keys.DAY, created, LABEL)
+    elif found.expires - found.created < LOCAL_DAYS * keys.DAY:
+        # Upgrade valid annual metadata once, retaining the bearer and original id.
+        accepted = keys.Key(found.id, found.sha256, found.subject, found.role,
+                            int(now) + LOCAL_DAYS * keys.DAY, found.created, found.label)
+    else:
+        accepted = found
+    retained = tuple(k for k in current.keys if k not in owned_keys)
+    wanted = keys.KeyFile(current.issuer, retained + (accepted,))
+    if wanted != current:
+        wanted.save(keyfile)
+    return token, new_key
 
 
-def choose_gated(choice: str, only: list[str], state: str) -> tuple[list[str], list[str]]:
-    """(services to set up, those of them behind the gateway) for --gateway keep|none|all|a,b."""
-    value = choice.strip().lower()
-    kept = gated_now(state)
-    # Previously gated services must return as direct entries when they leave the gateway,
-    # including opt-in services omitted from this invocation of --only.
-    configured = only + [s for s in kept if s not in only]
-    if value in ("", "keep"):
-        return configured, kept
-    if value == "none":
-        return configured, []
-    if value == "all":
-        return configured, [s for s in only if s not in NEVER_GATED]
-    wanted = [s.strip() for s in value.split(",") if s.strip()]
-    wrong = [s for s in wanted if s not in only or s in NEVER_GATED]
-    if wrong:
-        raise ValueError(f"--gateway: {', '.join(wrong)} not among the chosen services, or never behind the "
-                         "gateway (the core and Knowledge stay direct)")
-    return configured, [s for s in only if s in wanted]
-
-
-def header_key(state: str, short: str) -> str | None:
-    try:
-        data = json.loads(headers_file(state, short).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None
-    return held_key({"headers": data}) if isinstance(data, dict) else None
-
-
-def write_private(path: Path, data: Any) -> None:
+def write_private(path: Path, data: Any, *, expected: disk.Version | None = None) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    disk.replace_atomically(path, (json.dumps(data, indent=2) + "\n").encode("utf-8"), create=not path.exists())
+    raw = (json.dumps(data, indent=2) + "\n").encode("utf-8")
+    if expected is None and path.exists():
+        previous, expected = disk.read_version(path, 512 * 1024)
+        if previous == raw:
+            return
+    disk.replace_atomically(path, raw, create=expected is None, expected=expected)
 
 
 GATEWAY_CALL_SECONDS = 900
@@ -192,7 +264,7 @@ def ferry_config(root: str, state: str, carried: list[str]) -> dict[str, Any]:
     for short in carried:
         # A read timeout for every backend call: without one a wedged backend holds the gateway's request
         # for good. Above the longest tool (d365_run, 600 s), so it never cuts a working call.
-        backend: dict[str, Any] = {"upstream": {"url": SERVICES[short].url, "headers_file": f"{short}.headers.json",
+        backend: dict[str, Any] = {"upstream": {"url": service_settings(SERVICES[short], state)["url"], "headers_file": f"../{short}/client.headers.json",
                                                 "timeout_seconds": GATEWAY_CALL_SECONDS}}
         if short in GUIDES:
             page = GUIDES[short]
@@ -213,12 +285,7 @@ def kit_files(folder: Path) -> dict[str, bytes]:
 def kit_report(root: str, state: str) -> dict[str, Any]:
     """Where the served kit is and how it compares with this release's kit. Reads only."""
     local, release = Path(kit_folder(state)), Path(root) / KIT
-    legacy = Path(state) / "kit"
     report: dict[str, Any] = {"folder": str(local), "release": str(release)}
-    if os.path.lexists(legacy):
-        report["state"] = "old-kit"
-        report["legacy"] = str(legacy)
-        return report
     if not (release / "bootstrap.md").is_file():
         report["state"] = "no-release-kit"
         return report
@@ -255,9 +322,24 @@ def seed_kit(root: str, state: str) -> None:
             raise
 
 
-def owned(service: Service, entry: Any) -> bool:
-    """Ours: the loopback HTTP entry setup writes. Anything else under our name stays for review."""
-    return isinstance(entry, dict) and entry.get("type") == "http" and entry.get("url") == service.url
+def owned(service: Service, entry: Any, state: str | None = None) -> bool:
+    """An owned entry follows its config; a matching setup bearer also proves an old port."""
+    if not isinstance(entry, dict) or entry.get("type") != "http":
+        return False
+    url = service_settings(service, state)["url"] if state is not None else service.url
+    if entry.get("url") in (service.url, url):
+        return True
+    if state is None or not isinstance(entry.get("url"), str):
+        return False
+    try:
+        parsed = urlsplit(entry["url"])
+    except ValueError:
+        return False
+    token = held_key(entry)
+    keyfile = service_keyfile(service, state)
+    if parsed.scheme != "http" or parsed.hostname != "127.0.0.1" or parsed.path != "/mcp" or token is None or not keyfile.exists():
+        return False
+    return any(k.sha256 == keys.fingerprint(token) and k.label == LABEL for k in keys.KeyFile.load(keyfile).keys)
 
 
 def held_key(entry: Any) -> str | None:
@@ -268,193 +350,119 @@ def held_key(entry: Any) -> str | None:
     return None
 
 
-def still_good(keyfile: Path, key: str | None, subject: str, now: float) -> bool:
-    if key is None or not keyfile.exists():
-        return False
-    try:
-        loaded = keys.KeyFile.load(keyfile)
-    except (OSError, ValueError):
-        return False
-    found = [k for k in loaded.keys if k.sha256 == keys.fingerprint(key)]
-    return bool(found) and found[0].subject == subject and found[0].expires > now + RENEW_BELOW_DAYS * keys.DAY
-
-
 def describe(service: Service, root: str, state: str, index: str, subject: str) -> dict[str, Any]:
     folder = os.path.join(state, "services", service.short)
-    python = os.path.join(root, "python", "python.exe")
     windowless = os.path.join(root, "python", "pythonw.exe")  # the logon tasks'
-    return {"name": service.name, "url": service.url, "folder": folder, "subject": subject,
+    config = service_settings(service, state)
+    return {"name": service.name, "url": config["url"], "folder": folder, "subject": subject,
             "task": f"pondNT {service.name}", "module": service.module,
-            "python": windowless if service.account == "user" else python,
-            "account": service.account,
+            "python": windowless,
+            "account": "user", "highest": service.short in ("core", "d365", "d365whsapp", "d365web", "d365data"),
             "arguments": arguments(service, folder, index, state),
             "log": os.path.join(folder, "service.log")}
 
 
 def plan(servers: dict[str, Any], root: str, state: str, index: str, only: list[str],
          user: str, computer: str, apply: bool = False, now: float | None = None,
-         gated: list[str] | tuple[str, ...] = ()) -> dict[str, Any]:
+         rotate_keys: bool = False, installed: tuple[str, ...] = ()) -> dict[str, Any]:
     now = time.time() if now is None else now
     subject = f"{user}@{computer}".lower()
-    result: dict[str, Any] = {"services": [], "conflicts": [], "removals": [], "retire": []}
-    gated = [s for s in gated if s in only and s not in NEVER_GATED]
-    carried: list[str] = []
-    gateway = SERVICES[GATEWAY]
-    gateway_entry = servers.get(gateway.name)
-    installed = owned(gateway, gateway_entry) or bool(gated_now(state))
-    if gated and gateway_entry is not None and not owned(gateway, gateway_entry):
-        # Refuse before publishing headers or removing a direct entry: this gateway is not ours.
-        result["conflicts"].append(f"{gateway.name}: customized entry retained; gateway transition not configured")
-        return result
+    selected = list(dict.fromkeys([*only, *(s for s in installed if s != GATEWAY)]))
+    migrations = check_config_ports(state, selected)
+    result: dict[str, Any] = {"services": [], "conflicts": [], "removals": []}
+    # Validate the whole scope and gateway dependencies before any write.
+    for short in selected:
+        service = SERVICES[short]
+        current = servers.get(service.name)
+        if current is not None and not owned(service, current, state):
+            result["conflicts"].append(f"{service.name}: customized entry retained; not configured")
+        elif short == "sourcecache" and not index:
+            result["conflicts"].append("boring-sourcecache: no source index; build it first")
+        elif short in OPT_IN_CONFIGS and not (Path(state) / "services" / short / OPT_IN_CONFIGS[short][0]).is_file():
+            name, doc = OPT_IN_CONFIGS[short]
+            result["conflicts"].append(f"{service.name}: no {name} in {Path(state) / 'services' / short}; see {doc}")
+        else:
+            credential(service, state, current, subject, now, rotate_keys, False)
+            result["services"].append(describe(service, root, state, index, subject))
+    available = {s["name"] for s in result["services"]}
+    for short in installed:
+        if short != GATEWAY and SERVICES[short].name not in available:
+            raise ValueError(f"installed {short} could not be prepared; resolve its conflict before updating")
+    gated = [short for short in selected if short not in NEVER_GATED
+             and SERVICES[short].name in available]
+    if gated:
+        gateway = SERVICES[GATEWAY]
+        current = servers.get(gateway.name)
+        if current is not None and not owned(gateway, current, state):
+            result["conflicts"].append(f"{gateway.name}: customized entry retained; not configured")
+            return {**result, "services": []}
+        credential(gateway, state, current, subject, now, rotate_keys, False)
+        result["services"].append(describe(gateway, root, state, index, subject))
+    # Only configurations for tasks that will be prepared are upgraded.
+    for item in result["services"]:
+        config = Path(item["folder"]) / "config.json"
+        if config in migrations:
+            item["config_change"] = "config.json: adds mode=keys"
+            if apply:
+                value, source = migrations[config]
+                write_private(config, value, expected=source)
     if "core" in only:
         report = kit_report(root, state)
-        if report["state"] == "old-kit":
-            result["conflicts"].append(
-                f"handbook: {report['legacy']} is an install from before the handbook, which this release does "
-                "not migrate; nothing configured. Uninstall it with its own setup (-Uninstall), move that "
-                "folder aside, then run this setup")
-            result["handbook"] = report
-            return result
+        result["handbook"] = report
+        if report["state"] == "no-bootstrap":
+            result["conflicts"].append(f"handbook: {report['folder']} has no bootstrap.md; left as it is")
         if apply and report["state"] == "new":
             seed_kit(root, state)
-            report = kit_report(root, state)
-            report["seeded"] = True
-        if report["state"] == "no-bootstrap":
-            result["conflicts"].append(f"handbook: {report['folder']} has no bootstrap.md; "
-                                       "left as it is, bootstrap will say it is unreadable")
-        result["handbook"] = report
-    for short in [s for s in only if s != GATEWAY] + ([GATEWAY] if gated else []):
+            result["handbook"] = {**kit_report(root, state), "seeded": True}
+    for item in result["services"]:
+        short = next(n for n, svc in SERVICES.items() if svc.name == item["name"])
         service = SERVICES[short]
-        behind = short in gated
-        if short == GATEWAY and not carried:
-            if installed:
-                # Like any other conflict, this leaves what is installed alone: retiring the gateway
-                # here would cut services it still carries, rewriting it would carry nothing.
-                result["conflicts"].append(
-                    f"{service.name}: none of the services chosen for it could be set up (see above); "
-                    "the installed gateway (entry, task, ferry.json) is left as it is, neither rewritten "
-                    "nor retired. Resolve those conflicts and run setup again, or -Gateway none to retire it")
-            else:
-                result["conflicts"].append(f"{service.name}: nothing to carry; not configured")
-            continue
-        if short == "sourcecache" and not index:
-            result["conflicts"].append("boring-sourcecache: no source index; build it first")
-            continue
-        if short in OPT_IN_CONFIGS and not (Path(state) / "services" / service.short / OPT_IN_CONFIGS[short][0]).is_file():
-            name, doc = OPT_IN_CONFIGS[short]
-            result["conflicts"].append(f"{service.name}: no {name} in "
-                                       f"{os.path.join(state, 'services', service.short)}; see {doc}")
-            continue
         current = servers.get(service.name)
-        if current is not None and not owned(service, current):
-            result["conflicts"].append(f"{service.name}: customized entry retained; not configured")
-            continue
-        item = describe(service, root, state, index, subject)
-        local = Path(item["folder"])
-        keyfile = local / "keys.json"
-        key = header_key(state, short) if behind else held_key(current)
-        rotate = not still_good(keyfile, key, subject, now)
-        item.update(new_key=rotate, behind=gateway.name if behind else None,
-                    entry_changes=(current is not None) if behind
-                    else (current is None or rotate or current.get("type") != "http"))
-        if behind:
-            carried.append(short)
-            if current is not None:
-                result["removals"].append(service.name)  # reached through the gateway from now on
+        folder = Path(item["folder"])
         if apply:
-            local.mkdir(parents=True, exist_ok=True)
-            config = {"url": service.url, "bind": "127.0.0.1", "port": service.port, "keys": {"file": "keys.json"}}
-            configfile = local / "config.json"
-            disk.replace_atomically(configfile, (json.dumps(config, indent=2) + "\n").encode("utf-8"),
-                                    create=not configfile.exists())
-            if rotate:
-                # Keep the working credential until .mcp.json is durably published.
-                # Failed preparation may leave an unused key; successful finalize
-                # removes it. Bound repeated interrupted preparations.
-                previous = keys.KeyFile.load(keyfile).keys if keyfile.exists() else ()
-                if sum(k.subject == subject and k.label == LABEL for k in previous) >= 16:
-                    raise ValueError("too many uncommitted setup keys; finish publication or remove obsolete keys")
-                issuer = f"key:{computer.lower()}-{service.short}"
-                _, key = keys.add(keyfile, subject, "writer", LOCAL_DAYS, LABEL,
-                                  issuer=None if keyfile.exists() else issuer, now=now)
-            if behind:
-                write_private(headers_file(state, short), {"Authorization": f"Bearer {key}"})
-            else:
-                item["entry"] = {"type": "http", "url": service.url, "headers": {"Authorization": f"Bearer {key}"}}
-            if short == GATEWAY:
-                write_private(local / FERRY, ferry_config(root, state, carried))
-        result["services"].append(item)
-    if carried:
-        result["gateway"] = {"name": gateway.name, "carries": [SERVICES[s].name for s in carried]}
-    if not gated and (owned(gateway, servers.get(gateway.name)) or gated_now(state)):
-        # -Gateway none: the gateway goes; its services come back as entries of their own (above).
-        if owned(gateway, servers.get(gateway.name)):
-            result["removals"].append(gateway.name)
-        result["retire"].append(describe(gateway, root, state, index, subject))
-    # Keep old routing files through preparation and service startup. An interrupted
-    # transition must retain the previous gateway's inputs until client publication.
+            folder.mkdir(parents=True, exist_ok=True)
+            config = folder / "config.json"
+            if not config.exists():
+                write_private(config, service_settings(service, state))
+            keyfile = service_keyfile(service, state)
+            keyfile.parent.mkdir(parents=True, exist_ok=True)
+            with file_lock(keyfile.with_name("." + keyfile.name + ".lock")):
+                token, new = credential(service, state, current, subject, now, rotate_keys, True)
+        else:
+            token, new = credential(service, state, current, subject, now, rotate_keys, False)
+        behind = short in gated
+        entry = {**(current or {}), "type": "http", "url": item["url"],
+                 "headers": {"Authorization": f"Bearer {token}"}}
+        item.update(new_key=new, behind=SERVICES[GATEWAY].name if behind else None,
+                    entry_changes=current is not None if behind else current != entry)
+        if behind:
+            if current is not None:
+                result["removals"].append(service.name)
+        elif apply:
+            item["entry"] = entry
+    if gated:
+        result["gateway"] = {"name": SERVICES[GATEWAY].name, "carries": [SERVICES[s].name for s in gated]}
+        if apply:
+            write_private(gateway_folder(state) / FERRY, ferry_config(root, state, gated))
     return result
 
 
-def finalize(servers: dict[str, Any], state: str, user: str, computer: str) -> dict[str, int]:
-    """After durable client publication (and the gateway's restart), remove only obsolete setup keys."""
-    subject = f"{user}@{computer}".lower()
-    removed = 0
-    gateway_entry = servers.get(SERVICES[GATEWAY].name)
-    configured = gated_now(state)
-    if configured and gateway_entry is not None and not owned(SERVICES[GATEWAY], gateway_entry):
-        raise ValueError("gateway entry is customized; routing and key cleanup refused")
-    behind = configured if owned(SERVICES[GATEWAY], gateway_entry) else []
-    for short, service in SERVICES.items():
-        if short in behind:
-            key = header_key(state, short)
-            if key is None:
-                continue
-        else:
-            entry = servers.get(service.name)
-            if not owned(service, entry):
-                continue
-            key = held_key(entry)
-        keyfile = Path(state) / "services" / service.short / "keys.json"
-        try:
-            current = keys.KeyFile.load(keyfile)
-        except FileNotFoundError:
-            raise ValueError(f"{service.name}: published, but {keyfile} is missing; cleanup refused. "
-                             "Run setup again to issue a key") from None
-        except (OSError, ValueError) as error:
-            raise ValueError(f"{service.name}: {keyfile} unreadable ({error}); cleanup refused") from None
-        held = [k for k in current.keys if key and k.sha256 == keys.fingerprint(key)
-                and k.subject == subject and k.label == LABEL and k.expires > time.time()]
-        if len(held) != 1:
-            raise ValueError("published service credential is not a current setup key; cleanup refused")
-        for old in current.keys:
-            if old.id != held[0].id and old.subject == subject and old.label == LABEL:
-                keys.remove(keyfile, old.id)
-                removed += 1
-    # Only the durably published client determines whether the old gateway is retired.
-    # Running setup again can still read its old backend roster before this point.
-    for short in SERVICES:
-        if short not in behind:
-            headers_file(state, short).unlink(missing_ok=True)
-    if not behind and gateway_entry is None:
-        (gateway_folder(state) / FERRY).unlink(missing_ok=True)
-    return {"removed": removed}
-
-
-def uninstall(servers: dict[str, Any], state: str, root: str = "", index: str = "") -> dict[str, Any]:
-    """What -Uninstall removes: our entries, the tasks; the folders (notebook, canvases) are only listed."""
-    behind = gated_now(state)
-    ours = [s for k, s in SERVICES.items()
-            if owned(s, servers.get(s.name)) or k in behind or (k == GATEWAY and behind)]
-    found = plan(servers, root, state, index, [s.short for s in ours if s.short != GATEWAY],
-                 getpass.getuser(), platform.node(), gated=behind)
-    return {"removals": [s.name for s in ours if owned(s, servers.get(s.name))],
-            "conflicts": [f"{s.name}: customized entry retained" for s in SERVICES.values()
-                          if s.name in servers and not owned(s, servers[s.name])],
-            "tasks": [f"pondNT {s.name}" for s in ours],
-            "folders": [os.path.join(state, "services", s.short) for s in ours],
-            "handbook": kit_folder(state),
-            "services": [*found["services"], *found["retire"]]}
+def uninstall(servers: dict[str, Any], state: str, root: str = "", index: str = "",
+              installed: tuple[str, ...] = ()) -> dict[str, Any]:
+    """Remove verified tasks/client entries; keep configuration, keys and data."""
+    ours = [svc for short, svc in SERVICES.items()
+            if owned(svc, servers.get(svc.name), state) or short in installed]
+    subject = f"{getpass.getuser()}@{platform.node()}".lower()
+    specs = [describe(svc, root, state, index, subject) for svc in ours
+             if not (svc.short == "sourcecache" and not index)
+             and not (svc.short in OPT_IN_CONFIGS and not
+                      (Path(state) / "services" / svc.short / OPT_IN_CONFIGS[svc.short][0]).is_file())]
+    return {"removals": [svc.name for svc in ours if owned(svc, servers.get(svc.name), state)],
+            "conflicts": [f"{svc.name}: customized entry retained" for svc in SERVICES.values()
+                          if svc.name in servers and not owned(svc, servers[svc.name], state)],
+            "tasks": [f"pondNT {svc.name}" for svc in ours],
+            "folders": [os.path.join(state, "services", svc.short) for svc in ours],
+            "handbook": kit_folder(state), "services": specs}
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -464,37 +472,40 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--state", required=True, help="e.g. %%LOCALAPPDATA%%\\boring-pondnt")
     parser.add_argument("--index", default="")
     parser.add_argument("--only", default=DEFAULT_ONLY)
-    parser.add_argument("--gateway", default="keep", help="keep, none, all, or services behind boring-gateway")
+    parser.add_argument("--installed", default="", help="current owned task names, observed by setup")
+    parser.add_argument("--describe", action="store_true", help="read-only task templates and fresh defaults")
     parser.add_argument("--plan", action="store_true", help="look only; write nothing")
-    parser.add_argument("--finalize", action="store_true", help="retire obsolete keys after durable client publication")
+    parser.add_argument("--rotate-keys", action="store_true", help="explicitly replace selected setup bearers")
     parser.add_argument("--uninstall", action="store_true", help="what -Uninstall removes; writes nothing")
     args = parser.parse_args(argv)
-    # The SYSTEM tasks run through cmd.exe, which expands %NAME% even inside quotes: a path with a
-    # "%" could start another program or log elsewhere. setup.ps1 refuses these first, too.
-    percent = [f"--{n} {v}" for n, v in (("root", args.root), ("state", args.state), ("index", args.index))
-               if "%" in v]
-    if percent:
-        parser.error(f"a path contains '%', which the tasks' cmd.exe lines would expand: {'; '.join(percent)}")
     only = [s.strip() for s in args.only.split(",") if s.strip()]
     unknown = [s for s in only if s not in SERVICES or s == GATEWAY]
     if unknown:
         parser.error(f"unknown services: {', '.join(unknown)}")
+    if args.describe:
+        subject = f"{getpass.getuser()}@{platform.node()}".lower()
+        configured = [short for short in SERVICES if short != GATEWAY
+                      and (Path(args.state) / "services" / short).is_dir()]
+        print(json.dumps({"default_services": DEFAULT_ONLY.split(","), "configured_services": configured,
+                          "services": [{"short": short, **describe(svc, args.root, args.state, args.index, subject)}
+                                       for short, svc in SERVICES.items()]}))
+        return
+    installed = tuple(s for s in args.installed.split(",") if s)
+    if any(s not in SERVICES for s in installed):
+        parser.error("installed task names must be known services")
     servers = json.load(sys.stdin)
     if not isinstance(servers, dict):
         parser.error("stdin must be the servers object of .mcp.json")
-    if sum((args.plan, args.finalize, args.uninstall)) > 1:
-        parser.error("plan, finalize and uninstall are mutually exclusive")
+    if args.uninstall and (args.plan or args.rotate_keys):
+        parser.error("uninstall cannot be combined with plan or rotate-keys")
     # Refusals (a corrupt ferry.json, a missing key file, a customized gateway) are ValueErrors:
     # one line on stderr and exit 2, not a traceback; setup.ps1 stops on the exit code.
     try:
-        if args.finalize:
-            answer: Any = finalize(servers, args.state, getpass.getuser(), platform.node())
-        elif args.uninstall:
-            answer = uninstall(servers, args.state, args.root, args.index)
+        if args.uninstall:
+            answer = uninstall(servers, args.state, args.root, args.index, installed)
         else:
-            only, gated = choose_gated(args.gateway, only, args.state)
             answer = plan(servers, args.root, args.state, args.index, only, getpass.getuser(), platform.node(),
-                          apply=not args.plan, gated=gated)
+                          apply=not args.plan, rotate_keys=args.rotate_keys, installed=installed)
     except ValueError as error:
         parser.error(str(error))
     print(json.dumps(answer))

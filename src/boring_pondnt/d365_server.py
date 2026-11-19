@@ -164,7 +164,7 @@ def main(argv: list[str] | None = None) -> None:
             return
         parser.error("serve requires --config: the D365 server speaks HTTP only; setup.ps1 writes it")
     except Outcome as outcome:
-        print(json.dumps(redact(outcome.as_dict())), file=sys.stderr)
+        print(json.dumps(redact(outcome.as_data())), file=sys.stderr)
         raise SystemExit(2) from None
     finally:
         for server in servers:

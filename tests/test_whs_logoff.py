@@ -18,7 +18,7 @@ from boring_pondnt.d365_entra import Response
 from boring_pondnt.d365whsapp_backends import FormBackend, load_backend
 from boring_pondnt.d365whsapp_client import WhsClient, WhsError
 from boring_pondnt.d365whsapp_protocol import parse_page
-from boring_pondnt.d365web_client import D365WebError
+from boring_pondnt.d365web_client import D365WebError, WebClient
 from boring_pondnt.d365web_whsform import page_from_form
 from boring_pondnt.whs_logoff import LogoffItems, LookupError, MAX_BYTES, lookup_path, names_from_reply
 from boring_pondnt.whs_steps import exit_button
@@ -115,7 +115,9 @@ class SignedInPage:
 
 
 def form(page, buttons=(), label="quit session"):
-    web = SimpleNamespace(page=page, config=SimpleNamespace(company="wrong-default"))
+    web = SimpleNamespace(page=page, config=SimpleNamespace(company="wrong-default"), _acted=False)
+    web._status = lambda: WebClient._status(web)
+    web._action = lambda fn, *a, **kw: WebClient._action(web, fn, *a, **kw)
     backend = FormBackend(web, list(buttons))
     menu = page_from_form({"caption": "Menu", "controls": [
         {"name": "ExitConfigured", "role": "CommandButton", "text": label},
@@ -123,7 +125,7 @@ def form(page, buttons=(), label="quit session"):
     login = page_from_form(FORM_LOGIN)
     pages, pressed = [menu, login], []
     backend._page = lambda: pages.pop(0) if len(pages) > 1 else pages[0]
-    backend._press = pressed.append
+    backend._press = lambda name: web._action(pressed.append, name)
     backend._logoff_worker = "W1"
     return backend, pages, pressed
 

@@ -1,4 +1,4 @@
-"""Run the core without a console window, its output in a log file.
+"""Run a normal service in its task process, sending its output to a log file.
 
 The core's scheduled task runs as the person at logon, in their session: under
 python.exe that would open a console window on their desktop. pythonw.exe has
@@ -17,11 +17,9 @@ from __future__ import annotations
 import runpy
 import sys
 
-# What a task may start this way: every service setup runs in the person's account
-# (setup_services.SERVICES with account="user"; a test keeps the two in step).
-ALLOWED = {"boring_pondnt.server", "boring_pondnt.d365_server",
-           "boring_pondnt.d365whsapp_server", "boring_pondnt.d365web_server",
-           "boring_pondnt.d365data_server"}
+from .setup_services import SERVICES
+
+ALLOWED = {service.module for service in SERVICES.values()}
 
 
 def main(argv: list[str] | None = None) -> None:

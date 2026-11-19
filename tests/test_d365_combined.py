@@ -149,7 +149,7 @@ def test_lazy_xref_keeps_source_identity_on_success_and_failure(index, tmp_path,
                            xref_server='OfflineSQL', xref_database='OtherReferences')
     result = asyncio.run(server.call_tool('xref', {'what': 'info'}))
     assert result.is_error and data(result)['code'] == 'unavailable'
-    assert 'OfflineSQL; OtherReferences' in data(result)['details']['source']
+    assert 'OfflineSQL; OtherReferences' in data(result)['source']
 
 
 def test_tool_schemas_are_strict_for_copilot(index, tmp_path):  # noqa: F811

@@ -41,7 +41,8 @@ Start with [Observation and ownership](#observation-and-ownership), then
 permission to restart the command. Stop and a nonzero wait cannot be combined. Because the same tool
 can stop work, its MCP annotation is write-capable even for ordinary status calls.
 The job owner attempts tree cleanup before publishing a terminal outcome;
-unconfirmed cleanup reports failed. An exited job can have a nonzero exit code,
+unconfirmed cleanup reports `failed`. Settled jobs use `completed` or `cancelled`,
+as the core and Crocodile do. A completed job can have a nonzero exit code,
 and even exit0 does not establish successful D365 processing: inspect the
 matching diagnostics.
 
@@ -278,7 +279,7 @@ AxDB remains `d365_sql`'s default database, independently selected per call.
 
 `serve --config config.json` is the only way to start it: authenticated HTTP (boring-service-kit's ServiceConfig): a Crocodile's
 introspection and registration with its `access` list as the allowed Ponds
-(what tools/devbox-start.ps1 writes), the server's own issuer, or access keys.
+(the separate Pond tunnel's configuration), the server's own issuer, or access keys.
 setup.ps1 writes the loopback configuration (access keys, 127.0.0.1:18514) and
 runs it at logon as the person, elevated. All nine tools in every mode. These Windows-only exceptions do
 not change the general services' HTTPS/OAuth target.
@@ -326,7 +327,7 @@ retrying it.
 | Foreground `timeout` after dispatch | The command was sent; its effects are unknown | Inspect diagnostics and application state before any resubmission |
 | Job `running`/`stopping`, or `wait_expired=true` | The same job is still executing or settling | Observe that job with `d365_job` |
 | `cleanup_confirmed=false` or `cleanup_unconfirmed` | Process cleanup could not be established | Keep the owning service/job evidence and arrange operator recovery |
-| Job `exited` | The process ended and cleanup settled | Check its exit code and the intended build/sync/BP results |
+| Job `completed` | The process ended and cleanup settled | Check its exit code and the intended build/sync/BP results |
 
 A normal foreground timeout restarts the warm session only after confirming
 cleanup of the old tree; it never replays the command. If cleanup fails, the

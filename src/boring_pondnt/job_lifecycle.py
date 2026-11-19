@@ -25,6 +25,7 @@ class ProcessRecord(Protocol):
     timeout_seconds: float | None
     state: str
     exit_code: int | None
+    timed_out: bool
     ended: float | None
     error: str | None
     cleanup_error: str | None
@@ -71,7 +72,12 @@ class ProcessJobs(Generic[J]):
         assert job.tree is not None
         result = settle(job.tree, job.stop_requested, job.timeout_seconds)
         with self._lock:
-            job.state, job.ended = ("failed" if failed else result.state), time.time()
+            # Common owns process settlement; this owner publishes agent job states.
+            job.state = "failed" if failed else {
+                "exited": "completed", "timed_out": "completed", "stopped": "cancelled",
+                "failed": "failed",
+            }[result.state]
+            job.ended, job.timed_out = time.time(), result.state == "timed_out"
             job.exit_code = result.exit_code
             job.error, job.cleanup_error = (failed or result.error), result.cleanup_error
         self._settled(job)
