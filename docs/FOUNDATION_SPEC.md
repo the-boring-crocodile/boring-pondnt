@@ -18,10 +18,12 @@ from what real use shows.
   was cut (`truncated`, `next_line`, `total`, `*_truncated`, `stopped`).
 - **Outcomes as data, in the Pond's shape.** Success is the result.
   Otherwise the call is `isError` and its text is
-  `{"status": "refused"|"failed", "code", "message", "details"?}`. Refused:
+  `{"status":"refused","code":"stale","message":"read it again","current_sha256":null}`.
+  Details are flat JSON values. Status is refused or failed. Refused:
   nothing started. Failed: it started and may have had effects. Codes, shared
   with the Pond where meanings match: `invalid_request`, `forbidden`,
-  `not_found`, `stale` (with `current_sha256`), `limit`; own codes only where
+  `not_found`, `stale` (with `current_sha256`), `limit` (size/count/capacity),
+  `not_admitted` (deadline expired before dispatch); own codes only where
   the Pond has no word: `locked`, `io_error`, `start_failed`.
 - **Strict arguments.** Unknown arguments are refused (the SDK would ignore
   them).
@@ -124,12 +126,14 @@ and when the command ends. If that cannot be confirmed, the result says
 
 `job_start` takes exec's arguments with `timeout_seconds` up to 86,400
 (default 3,600) and returns a status with a server-minted 32-hex `job_id`.
-States: `running`, `stopping`, `exited`, `timed_out`, `stopped`, `failed`.
+States: `running`, `stopping`, `completed`, `cancelled`, `failed`.
 The watcher publishes terminal state after cleanup; unsuccessful cleanup is
 `failed` with `cleanup_confirmed=false`. Stop can return `stopping` if its
 bounded wait expires. `job_wait` takes 1-32
-ids and waits up to 60 s for all of them (`all_ended`); `wait_seconds: 0`
-just returns their status (there is no separate `job_status`). `job_output` returns
+ids and waits up to 60 s for settlement: `settled` and `wait_expired`, with
+`elapsed_seconds`. Unknown ids have per-job refusals and count as settled.
+`completed` includes a nonzero exit or timeout: inspect `exit_code` and `timed_out`.
+`wait_seconds: 0` reads status immediately. `job_output` returns
 the last `tail_lines` (default 100) or `line_count` lines from `start_line`
 (max 2,000 lines, 32 KiB). `job_stop` kills the tree. `job_list` is this
 session's jobs, newest first. Output lives in the state directory
@@ -152,11 +156,12 @@ the other job calls) are not given the remaining time; each runs to its own
 limits once started. Cleanup can extend the return time, and job_start retains
 its own background lifetime. A nonzero or
 timed-out exec is a failed step and obeys on_error. Each result: `status` (`succeeded`, `refused`,
-`failed`, `not_started`), its `result`, `refusal` or `failed`, and
-`duration_ms`; plus `stop_reason`, `all_attempted`, `result_chars`,
-`elapsed_seconds`. Once the step results together exceed 256 K characters
+`failed`, `not_started`), its `result`, `refusal` or `failure`, and
+`duration_ms`. Both embedded outcomes use the shared flat rendering above.
+Other job and submission lifecycle records retain their own fields. The batch
+also reports `stop_reason`, `all_attempted`, `result_chars`, `elapsed_seconds`. Once the step results together exceed 256 K characters
 (*initial*), the remaining steps are `not_started` with `stop_reason:
-result_limit`: every result is re-sent on every later turn. No rollback.
+output_limit`: every result is re-sent on every later turn. No rollback.
 
 ## Call log
 
@@ -227,7 +232,11 @@ bytes otherwise unchanged; a job started, waited for and read; long paths
 - **Locks:** sharing violations are `locked` (refused on read, failed on
   write), not a retry loop.
 - **Launch:** started by absolute path from a versioned release folder;
-  nothing is resolved or downloaded at launch.
+  nothing is resolved or downloaded at launch. Normal setup registers one
+  person/logon task per service, invoking pythonw directly with the in-process
+  logging bootstrap. Scheduler owns task shutdown. The optional Pond tunnel
+  runs independent copies inside its own visible-window Job Object; it is
+  not another installer or scheduled service manager.
 
 Windows-only tests (exit codes in both PowerShells, UTF-8, cmd quoting, tree
 kill on timeout and on normal end) skip off Windows. They run with the full

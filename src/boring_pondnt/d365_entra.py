@@ -23,9 +23,10 @@ TOKEN_TIMEOUT = 30.0
 class EntraError(Exception):
     """A token or secret failure with its stable code."""
 
-    def __init__(self, code: str, message: str, **details: object) -> None:
+    def __init__(self, code: str, message: str, *, dispatch_started: bool | None = None, **details: object) -> None:
         super().__init__(message)
         self.code, self.message, self.details = code, message, details
+        self.dispatch_started = dispatch_started  # None: dispatch is unknown
 
 
 def _token_http_error(response: Response) -> EntraError:
@@ -52,13 +53,13 @@ def _token_http_error(response: Response) -> EntraError:
                                 "[ID omitted]", first_line, flags=re.IGNORECASE)
             if first_line:
                 message += ": " + first_line[:300]
-    return EntraError("token_failed", message, **details)
+    return EntraError("token_failed", message, dispatch_started=True, **details)
 
 
 def read_dpapi_secret(path: str) -> str:
     """A secret written by `ConvertFrom-SecureString` (DPAPI, current user): hex of the blob."""
     if sys.platform != "win32":
-        raise EntraError("secret_unavailable", "DPAPI secrets can only be read on Windows")
+        raise EntraError("secret_unavailable", "DPAPI secrets can only be read on Windows", dispatch_started=False)
     import ctypes
     from ctypes import wintypes
 
@@ -68,12 +69,12 @@ def read_dpapi_secret(path: str) -> str:
     try:
         raw = bytes.fromhex(Path(path).read_text(encoding="utf-8-sig").strip())
     except (OSError, ValueError) as exc:
-        raise EntraError("secret_unavailable", f"cannot read the client secret file: {exc}") from None
+        raise EntraError("secret_unavailable", f"cannot read the client secret file: {exc}", dispatch_started=False) from None
     buffer = ctypes.create_string_buffer(raw, len(raw))
     blob_in, blob_out = Blob(len(raw), buffer), Blob()
     crypt32, kernel32 = ctypes.windll.crypt32, ctypes.windll.kernel32  # type: ignore[attr-defined]
     if not crypt32.CryptUnprotectData(ctypes.byref(blob_in), None, None, None, None, 0, ctypes.byref(blob_out)):
-        raise EntraError("secret_unavailable", "DPAPI could not decrypt the client secret (other user or machine?)")
+        raise EntraError("secret_unavailable", "DPAPI could not decrypt the client secret (other user or machine?)", dispatch_started=False)
     try:
         return ctypes.string_at(blob_out.pbData, blob_out.cbData).decode("utf-16-le")
     finally:
@@ -133,13 +134,13 @@ class TokenSource:
         def remaining() -> float:
             seconds = deadline - time.monotonic() if deadline is not None else math.inf
             if seconds <= 0:
-                raise EntraError("timeout", "the call deadline expired while obtaining an Entra token")
+                raise EntraError("timeout", "the call deadline expired while obtaining an Entra token", dispatch_started=False)
             return seconds
 
         if deadline is None:
             self._lock.acquire()
         elif not self._lock.acquire(timeout=min(remaining(), threading.TIMEOUT_MAX)):
-            raise EntraError("timeout", "the call deadline expired while obtaining an Entra token")
+            raise EntraError("timeout", "the call deadline expired while obtaining an Entra token", dispatch_started=False)
         try:
             remaining()
             if self._token and time.monotonic() < self._expires - 120:
@@ -152,9 +153,9 @@ class TokenSource:
                 response = self.transport(url, {"Content-Type": "application/x-www-form-urlencoded"},
                                           body, min(TOKEN_TIMEOUT, remaining()))
             except (OSError, socket.timeout) as exc:
-                raise EntraError("token_failed", f"Entra token request failed: {exc}") from None
+                raise EntraError("token_failed", f"Entra token request failed: {exc}", dispatch_started=True) from None
             except (http.client.HTTPException, ValueError):
-                raise EntraError("token_failed", "Entra token transport rejected the request or response") from None
+                raise EntraError("token_failed", "Entra token transport rejected the request or response", dispatch_started=True) from None
             if response.status != 200:
                 raise _token_http_error(response)
             try:
@@ -169,7 +170,7 @@ class TokenSource:
                 if not math.isfinite(seconds) or seconds <= 0:
                     raise ValueError
             except (ValueError, TypeError, OverflowError, RecursionError):
-                raise EntraError("token_failed", "Entra returned an unusable token reply") from None
+                raise EntraError("token_failed", "Entra returned an unusable token reply", dispatch_started=True) from None
             self._token = token
             self._expires = time.monotonic() + seconds
             self._fetched = time.monotonic()

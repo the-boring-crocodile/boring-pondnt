@@ -279,13 +279,14 @@ cannot be copied between users in the database.
 - **For Copilot on the machine:** put it in
   `%LOCALAPPDATA%\boring-pondnt\services\d365whsapp\d365whsapp.json`, then
   [preview and apply pondNT setup](INSTALL.md) with `d365whsapp` included in your
-  complete intended `-Services` list and `-Gateway all`. This keeps core and
-  Knowledge direct and carries the other selected services through Ferry.
+  -Services list. Existing owned services remain included; Ferry routing is automatic.
+  Core and Knowledge stay direct.
   Setup refuses d365whsapp while the file is missing.
-- **For a Pond through the tunnel:** put it in the tunnel's folder
-  (`C:\temp\ci\d365whsapp.json`) next to the provisioned `devbox-d365whsapp-id` and
-  `devbox-d365whsapp-secret`. `devbox-start.ps1` then starts `devbox-d365whsapp` on
-  18524 (the tunnel account must permit listening on 18524).
+- **For a Pond through the tunnel:** keep a separate settings/credential copy
+  in the tunnel's private state directory and reference it from its settings.
+  The standalone window starts `<box>-d365whsapp` on the box's chosen port
+  (default 18534); the host key must permit that forward. Follow
+  [tunnel provisioning](DEVBOX_TUNNEL.md#first-setup-of-this-tunnel), independent of normal setup.
 
 The first OData or service call after an IIS start can take minutes (warm-up);
 `step_timeout` covers heavy steps such as a receipt that creates work.

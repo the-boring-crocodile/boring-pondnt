@@ -275,7 +275,7 @@ def create_server(kit: Path | None = None, state_dir: Path | None = None,
         return manager().start(command, default_shell(shell), cwd, timeout_seconds)
 
     @tool(READ_ONLY, "reader")
-    @described("Read job states. Repeat while running, then use job_output for output." + limit)
+    @described("Wait for job settlement. wait_expired is a normal wait result; then use job_output for output." + limit)
     def job_wait(
         job_ids: Annotated[list[str], Field(
             description="IDs from job_start.",
@@ -427,7 +427,7 @@ def run_batch(mcp: MCPServer, plain: dict[str, Callable[..., dict[str, Any]]],
             continue
         remaining = deadline - time.monotonic()
         if remaining <= 0 or (method == "exec" and remaining < 0.1):
-            stop_reason = "timeout"
+            stop_reason = "deadline"
             results.append({"id": step_id, "method": method, "status": "not_started"})
             continue
         # Do not turn an invalid request into a valid one while narrowing its budget.
@@ -443,21 +443,20 @@ def run_batch(mcp: MCPServer, plain: dict[str, Callable[..., dict[str, Any]]],
             result = entry["result"] = plain[method](**arguments)
             if method == "exec" and (result["timed_out"] or result["exit_code"] != 0):
                 entry["status"] = "failed"
-                entry["failed"] = {"status": "failed", "code": "command_failed",
-                                   "message": exec_failure(result)}
+                entry["failure"] = Failed("command_failed", exec_failure(result)).as_data()
         except Outcome as outcome:
             entry["status"] = outcome.status
-            entry[outcome.status if outcome.status == "failed" else "refusal"] = outcome.as_dict()
+            entry["failure" if outcome.status == "failed" else "refusal"] = outcome.as_data()
         except Exception as exc:  # a bug, not an outcome: report it, keep the batch honest
             entry["status"] = "failed"
-            entry["failed"] = {"status": "failed", "code": "internal_error", "message": repr(exc)}
+            entry["failure"] = Failed("internal_error", repr(exc)).as_data()
         entry["duration_ms"] = round((time.monotonic() - step_start) * 1000)
         results.append(entry)
         result_chars += len(json.dumps(entry, ensure_ascii=False, separators=(",", ":")))
         if entry["status"] != "succeeded" and on_error == "stop":
             stop_reason = f"step_{entry['status']}"
         elif result_chars > BATCH_RESULT_MAX:
-            stop_reason = "result_limit"  # every result is re-sent on every later turn
+            stop_reason = "output_limit"  # every result is re-sent on every later turn
     return {
         "results": results,
         "stop_reason": stop_reason,

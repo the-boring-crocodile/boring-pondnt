@@ -29,7 +29,7 @@ def test_only_owning_screen_collects_delayed_step(web, tmp_path, fails):
     def delayed(*args):
         assert release.wait(5)
         if fails:
-            raise D365WebError("browser", "synthetic failure; outcome unknown")
+            raise D365WebError("browser", "synthetic failure; outcome unknown", status='failed')
         return {**page, "title": "Original completion"}
 
     backend = FormBackend(web)
@@ -135,11 +135,11 @@ def test_submit_respects_actual_setter_result(web, tmp_path, outcome, budget):
     else:
         assert error and result["code"] == "set_incomplete"
         assert pressed == []
-        assert result["details"]["applied"][0]["differs"] is True
+        assert result["applied"][0]["differs"] is True
         if outcome == "warning":
             assert typed == ["B1"]
-            assert result["details"]["stopped_at"] == "Batch"
-            assert result["details"]["new_messages"][0]["severity"] == "warning"
+            assert result["stopped_at"] == "Batch"
+            assert result["new_messages"][0]["severity"] == "warning"
         else:
             assert typed == ["B1", "7"]
 
@@ -154,7 +154,7 @@ def test_login_stops_on_rejected_values_and_masks_password(web, tmp_path):
         error, result = call(server, "whs_screen", {"worker": "W1"})
     assert error and result["code"] == "set_incomplete"
     assert typed == ["W1", "s3cret"] and pressed == []
-    assert result["details"]["applied"][1]["value"] == "***"
+    assert result["applied"][1]["value"] == "***"
     assert "s3cret" not in str(result)
     assert "s3cret" not in (tmp_path / "whs-steps/steps-W1.log").read_text()
 
@@ -225,7 +225,7 @@ def _login_backend(web, monkeypatch, press_error=None, set_error=None):
 
 
 def test_an_error_after_pressing_login_says_not_to_retry_the_password(web, monkeypatch):
-    backend, closed = _login_backend(web, monkeypatch, press_error=D365WebError("unexpected", "an infolog box"))
+    backend, closed = _login_backend(web, monkeypatch, press_error=D365WebError("unexpected", "an infolog box", status='failed'))
     with pytest.raises(D365WebError) as caught:
         backend._op_login("W1", "pw", None)
     assert caught.value.code == "login_outcome_unknown" and "do not retry the password" in caught.value.message
@@ -233,7 +233,7 @@ def test_an_error_after_pressing_login_says_not_to_retry_the_password(web, monke
 
 
 def test_a_login_that_failed_before_the_press_drops_the_tab_it_made(web, monkeypatch):
-    backend, closed = _login_backend(web, monkeypatch, set_error=D365WebError("set_incomplete", "did not take"))
+    backend, closed = _login_backend(web, monkeypatch, set_error=D365WebError("set_incomplete", "did not take", status='failed'))
     with pytest.raises(D365WebError) as caught:
         backend._op_login("W1", "pw", None)
     assert caught.value.code == "set_incomplete" and closed == ["W1"]

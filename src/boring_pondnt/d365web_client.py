@@ -26,7 +26,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, fields
 from functools import partial
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Literal
 from urllib.parse import parse_qs, quote, urlsplit
 
 from . import scenario_values
@@ -47,11 +47,15 @@ FALSE_WORDS = {"no", "false", "0", "off", "nein", ""}
 
 
 class D365WebError(Exception):
-    """`code`: signin_required, not_found, refused, busy, no_lookup, browser, config."""
+    """Explicit status plus a cause: signin_required, not_found, invalid_request, conflict, unavailable, unsupported, ambiguous, busy, no_lookup, browser, config."""
 
-    def __init__(self, code: str, message: str, **details: Any) -> None:
+    def __init__(self, code: str, message: str, *, status: Literal["refused", "failed"], **details: Any) -> None:
         super().__init__(f"{code}: {message}")
-        self.code, self.message, self.details = code, message, details
+        if status not in ("refused", "failed"):
+            raise ValueError("status must be refused or failed")
+        self.code, self.message, self.details, self.status = code, message, details, status
+        if status == "failed":
+            self.details.setdefault("effects", "unknown")
 
 
 def default_profiles_dir() -> Path:
@@ -127,10 +131,10 @@ def field_key_explicit(key: str) -> bool:
     return bool(match and match.group("nth") is not None)
 
 
-def parse_field_key(key: str) -> tuple[str, int]:
+def parse_field_key(key: str, *, acted: bool = False) -> tuple[str, int]:
     match = FIELD_KEY.match(key.strip())
     if not match or not match.group("name"):
-        raise D365WebError("refused", f"bad field name {key!r}")
+        raise D365WebError("invalid_request", f"bad field name {key!r}", status="failed" if acted else "refused")
     return match.group("name"), int(match.group("nth") or 0)
 
 
@@ -145,11 +149,11 @@ def normalize_values(values: Any) -> list[tuple[str, Any]]:
             elif isinstance(item, dict) and set(item) == {"field", "value"} and isinstance(item["field"], str):
                 pairs.append((item["field"], item["value"]))
             else:
-                raise D365WebError("refused", f"values: expected [name, value] pairs, got {item!r}")
+                raise D365WebError("invalid_request", f"values: expected [name, value] pairs, got {item!r}", status='refused')
     else:
-        raise D365WebError("refused", "values must be an object or a list of [name, value] pairs")
+        raise D365WebError("invalid_request", "values must be an object or a list of [name, value] pairs", status='refused')
     if not pairs:
-        raise D365WebError("refused", "values is empty")
+        raise D365WebError("invalid_request", "values is empty", status='refused')
     return pairs
 
 
@@ -204,7 +208,7 @@ EXPECT_KEYS = {"scope", "form", "caption", "fields", "editable", "message", "no_
 
 
 def _refused(message: str) -> D365WebError:
-    return D365WebError("refused", message)
+    return D365WebError("invalid_request", message, status='refused')
 
 
 substitute = partial(scenario_values.substitute, refuse=_refused)
@@ -212,7 +216,7 @@ substitute = partial(scenario_values.substitute, refuse=_refused)
 
 def _step_text(value: Any, name: str, *, empty: bool = False) -> None:
     if not isinstance(value, str) or (not empty and not value.strip()):
-        raise D365WebError("refused", f"{name}: expected {'text' if empty else 'nonempty text'}")
+        raise D365WebError("invalid_request", f"{name}: expected {'text' if empty else 'nonempty text'}", status='refused')
 
 
 def _step_int(value: Any, name: str, minimum: int = 0, *, templates: bool = False) -> None:
@@ -222,7 +226,7 @@ def _step_int(value: Any, name: str, minimum: int = 0, *, templates: bool = Fals
         if re.fullmatch(r"[+-]?[0-9]+", value):
             value = int(value)
     if type(value) is not int or value < minimum:
-        raise D365WebError("refused", f"{name}: expected an integer >= {minimum}")
+        raise D365WebError("invalid_request", f"{name}: expected an integer >= {minimum}", status='refused')
 
 
 def _step_map(value: Any, name: str) -> None:
@@ -235,14 +239,14 @@ def check_operation(op: str, args: dict[str, Any], *, templates: bool = False) -
     required = {"open": "menu_item", "set": "values", "press": "name", "lookup": "field",
                 "key": "keys", "tree": "path"}
     if op in required and required[op] not in args:
-        raise D365WebError("refused", f"{op}: missing {required[op]}")
+        raise D365WebError("invalid_request", f"{op}: missing {required[op]}", status='refused')
     for name in ("menu_item", "name", "field", "keys"):
         if name in args:
             _step_text(args[name], name)
     if op == "tree":
         path = args["path"]
         if not isinstance(path, list) or not 1 <= len(path) <= TREE_DEPTH_MAX:
-            raise D365WebError("refused", f"path: expected a list of 1-{TREE_DEPTH_MAX} node labels, root first")
+            raise D365WebError("invalid_request", f"path: expected a list of 1-{TREE_DEPTH_MAX} node labels, root first", status='refused')
         for label in path:
             _step_text(label, "path")
     for name in ("company", "kind", "pick", "column", "grid", "tree"):
@@ -257,16 +261,16 @@ def check_operation(op: str, args: dict[str, Any], *, templates: bool = False) -
             kind = scenario_values.VARIABLE.sub("display", kind) if kind else kind
         menu = f"{kind}:{menu}" if kind and kind != "display" else menu
         if not MENU_ITEM.fullmatch(menu):
-            raise D365WebError("refused", "menu_item: invalid menu item")
+            raise D365WebError("invalid_request", "menu_item: invalid menu item", status='refused')
         if company and not re.fullmatch(r"[a-zA-Z0-9]{1,8}", company):
-            raise D365WebError("refused", "company: expected 1-8 letters or digits")
+            raise D365WebError("invalid_request", "company: expected 1-8 letters or digits", status='refused')
         if kind is not None and kind not in MENU_KINDS:
-            raise D365WebError("refused", "kind: expected display, action or output")
+            raise D365WebError("invalid_request", "kind: expected display, action or output", status='refused')
     for name in ("nth", "row", "max_rows"):
         if name in args:
             _step_int(args[name], name, 1 if name == "max_rows" else 0, templates=templates)
     if "full" in args and type(args["full"]) is not bool:
-        raise D365WebError("refused", "full: expected a boolean")
+        raise D365WebError("invalid_request", "full: expected a boolean", status='refused')
     if "value" in args:
         _step_text(args["value"], "value", empty=True)
     if op == "set":
@@ -280,10 +284,10 @@ def check_operation(op: str, args: dict[str, Any], *, templates: bool = False) -
 
 def _check_web_expect(expect: Any, *, templates: bool = False) -> None:
     if not isinstance(expect, dict):
-        raise D365WebError("refused", "expect must be an object")
+        raise D365WebError("invalid_request", "expect must be an object", status='refused')
     bad = set(expect) - EXPECT_KEYS
     if bad:
-        raise D365WebError("refused", f"unknown expect keys {sorted(bad)}; use {sorted(EXPECT_KEYS)}")
+        raise D365WebError("invalid_request", f"unknown expect keys {sorted(bad)}; use {sorted(EXPECT_KEYS)}", status='refused')
     for name in ("scope", "form", "caption", "message"):
         if name in expect:
             _step_text(expect[name], name, empty=True)
@@ -292,15 +296,15 @@ def _check_web_expect(expect: Any, *, templates: bool = False) -> None:
     for name in ("editable", "enabled", "disabled"):
         if name in expect:
             if not isinstance(expect[name], list):
-                raise D365WebError("refused", f"expect.{name}: expected a list of names")
+                raise D365WebError("invalid_request", f"expect.{name}: expected a list of names", status='refused')
             for item in expect[name]:
                 _step_text(item, f"expect.{name}")
     if "no_errors" in expect and type(expect["no_errors"]) is not bool:
-        raise D365WebError("refused", "expect.no_errors: expected a boolean")
+        raise D365WebError("invalid_request", "expect.no_errors: expected a boolean", status='refused')
     if "grid" in expect:
         grid = expect["grid"]
         if not isinstance(grid, dict) or set(grid) - {"name", "rows", "contains"}:
-            raise D365WebError("refused", "expect.grid: expected an object with name/rows/contains")
+            raise D365WebError("invalid_request", "expect.grid: expected an object with name/rows/contains", status='refused')
         if "name" in grid:
             _step_text(grid["name"], "expect.grid.name", empty=True)
         if "rows" in grid:
@@ -311,18 +315,18 @@ def _check_web_expect(expect: Any, *, templates: bool = False) -> None:
 
 def _check_web_save(save: Any) -> None:
     if not isinstance(save, dict):
-        raise D365WebError("refused", "save must be an object")
+        raise D365WebError("invalid_request", "save must be an object", status='refused')
     for name, spec in save.items():
         if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
-            raise D365WebError("refused", "save: invalid variable name")
+            raise D365WebError("invalid_request", "save: invalid variable name", status='refused')
         if isinstance(spec, str):
             spec = {"from": spec}
         if not isinstance(spec, dict) or set(spec) - {"from", "regex", "row", "grid"}:
-            raise D365WebError("refused", "save specification: expected from/regex/row/grid")
+            raise D365WebError("invalid_request", "save specification: expected from/regex/row/grid", status='refused')
         source = spec.get("from")
         if not isinstance(source, str) or not (
                 source in ("caption", "message") or re.fullmatch(r"(field|grid):.+", source)):
-            raise D365WebError("refused", "save.from: expected caption, message, field:NAME or grid:COLUMN")
+            raise D365WebError("invalid_request", "save.from: expected caption, message, field:NAME or grid:COLUMN", status='refused')
         if "row" in spec:
             _step_int(spec["row"], "save.row")
         if "grid" in spec:
@@ -332,23 +336,23 @@ def _check_web_save(save: Any) -> None:
             try:
                 re.compile(spec["regex"])
             except re.error:
-                raise D365WebError("refused", "save.regex: invalid regular expression") from None
+                raise D365WebError("invalid_request", "save.regex: invalid regular expression", status='refused') from None
 
 
 def check_steps(steps: Any, variables: dict[str, Any] | None = None) -> None:
     if not isinstance(steps, list) or not steps:
-        raise D365WebError("refused", "steps is empty")
+        raise D365WebError("invalid_request", "steps is empty", status='refused')
     if len(steps) > SCENARIO_STEPS_MAX:
-        raise D365WebError("refused", f"at most {SCENARIO_STEPS_MAX} steps per scenario")
+        raise D365WebError("limit", f"at most {SCENARIO_STEPS_MAX} steps per scenario", status='refused')
     available = {k: str(v) for k, v in (variables or {}).items()}
     for index, step in enumerate(steps, 1):
         try:
             if not isinstance(step, dict) or not isinstance(step.get("op"), str) or step["op"] not in STEP_ARGS:
-                raise D365WebError("refused", f"op must be one of {sorted(STEP_ARGS)}")
+                raise D365WebError("invalid_request", f"op must be one of {sorted(STEP_ARGS)}", status='refused')
             op = step["op"]
             unknown = set(step) - STEP_KEYS - STEP_ARGS[op]
             if unknown:
-                raise D365WebError("refused", f"unknown keys {sorted(unknown)}")
+                raise D365WebError("invalid_request", f"unknown keys {sorted(unknown)}", status='refused')
             args = {k: v for k, v in step.items() if k in STEP_ARGS[op]}
             args, expect = substitute([args, step.get("expect", {})], available)
             check_operation(op, args, templates=True)
@@ -359,7 +363,7 @@ def check_steps(steps: Any, variables: dict[str, Any] | None = None) -> None:
             # Saved page data is not known yet; preserve its placeholder for shape checks.
             available.update({name: "${" + name + "}" for name in step.get("save", {})})
         except D365WebError as error:
-            raise D365WebError(error.code, f"step {index}: {error.message}") from None
+            raise D365WebError(error.code, f"step {index}: {error.message}", status=error.status) from None
 
 
 def same_value(expected: Any, actual: str) -> bool:
@@ -481,13 +485,13 @@ def extract_variable(state: dict[str, Any], spec: Any) -> str | None:
     return text
 
 
-def as_bool(value: str) -> bool:
+def as_bool(value: str, *, acted: bool = False) -> bool:
     word = str(value).strip().lower()
     if word in TRUE_WORDS:
         return True
     if word in FALSE_WORDS:
         return False
-    raise D365WebError("refused", f"checkbox value must be yes/no, got {value!r}")
+    raise D365WebError("invalid_request", f"checkbox value must be yes/no, got {value!r}", status="failed" if acted else "refused")
 
 
 def context_moves(before: Any, after: Any) -> list[str] | None:
@@ -511,9 +515,9 @@ BROWSER = "browser"  # WebClient's one run key: one browser, one step at a time
 
 def _busy(run: Run) -> D365WebError:
     if not run.future.done():
-        return D365WebError("busy", f"{run.label} is still running; call web_wait first")
+        return D365WebError("busy", f"{run.label} is still running; call web_wait first", status='refused')
     return D365WebError("busy", f"{run.label} has finished and its result has not been collected; "
-                                "call web_wait for it first")
+                                "call web_wait for it first", status='refused')
 
 
 @dataclass
@@ -533,6 +537,7 @@ class WebClient:
         self.js_dialogs_dismissed: list[str] = []  # confirm/prompt dialogs cancelled during the step
         self.dismissed: list[str] = []  # teaching tips acknowledged during the current step (see _uncover)
         self.keep_open: Callable[[], bool] | None = None  # true: the idle close waits (another owner's tabs)
+        self._acted = False  # owned by the single browser executor, reset for each admitted operation
         self._idle_unknown = 0  # idle closes put off because the page did not say whether it holds unsaved changes
         self.stop = threading.Event()
         self.reaper = threading.Thread(target=self._reap_idle, name="d365web-idle", daemon=True)
@@ -560,14 +565,46 @@ class WebClient:
             self.last_used = time.monotonic()
 
     def _guarded(self, fn: Callable[[], Any]) -> Any:
+        self._acted = False
         try:
             return fn()
         except BrowserError as error:
             if self.browser is not None and self.browser.conn.closed:
                 self.browser, self.page = None, None
-            raise D365WebError("browser", error.message, browser_code=error.code) from None
+            raise D365WebError("browser", error.message, browser_code=error.code,
+                               status="refused" if error.before_action and self._status() == "refused" else "failed") from None
         finally:
             self.last_used = time.monotonic()
+
+    def _status(self) -> Literal["refused", "failed"]:
+        """The raising site asks whether this operation has already attempted an action."""
+        return "failed" if getattr(self, "_acted", False) else "refused"
+
+    def _action(self, send: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+        # Mark before dispatch: a lost reply cannot prove the action did not happen.
+        previous = getattr(self, "_acted", False)
+        self._acted = True
+        try:
+            return send(*args, **kwargs)
+        except BrowserError as error:
+            if error.before_action:
+                self._acted = previous  # earlier input in this operation still counts
+            raise
+
+    def _model_js(self, op: str, *args: Any) -> Any:
+        result = self._js(op, *args)
+        # The page-side model reports what it did. Fallback/no_option/acted:none
+        # are pre-action answers; loading means a model request was dispatched.
+        if isinstance(result, dict) and (result.get("acted") not in (None, "", "none")
+                                         or result.get("loading")):
+            self._acted = True
+        return result
+
+    def _scroll_grid(self, grid: str, direction: str) -> Any:
+        result = self._js("gridScroll", grid, direction)
+        if isinstance(result, dict) and result.get("after", 0) != result.get("before", 0):
+            self._acted = True
+        return result
 
     def _reap_idle(self) -> None:
         while not self.stop.wait(30.0):
@@ -599,11 +636,11 @@ class WebClient:
                 if error.code == "foreign" and port == self.config.debug_port:
                     # launching on that port would end up talking to the same foreign Edge
                     raise D365WebError("browser", f"another Edge (another profile) uses debugging port {port}; "
-                                       "close it or configure another debug_port") from None
+                                       "close it or configure another debug_port", status=self._status()) from None
                 continue
             except (OSError, ValueError, KeyError):
                 continue
-        return Browser.launch(profile, headless=self.config.headless, edge=self.config.edge,
+        return self._action(Browser.launch, profile, headless=self.config.headless, edge=self.config.edge,
                               port=self.config.debug_port)
 
     def _ensure(self) -> Page:
@@ -616,7 +653,7 @@ class WebClient:
             # an attached headed Edge may hold other tabs: prefer the one on this D365
             ours = [t for t in pages if t.get("url", "").startswith(self.config.url)]
             chosen = (ours or pages)[:1]
-            self.page = Page(self.browser.conn, chosen[0]["targetId"]) if chosen else self.browser.new_page()
+            self.page = Page(self.browser.conn, chosen[0]["targetId"]) if chosen else self._action(self.browser.new_page)
         return self.page
 
     def _close_idle(self) -> None:
@@ -644,7 +681,7 @@ class WebClient:
         if browser is None:
             return {"closed": False, "reason": "no browser"}
         # the profile is d365web's own: an Edge attached on it (left from an earlier start) is closed too
-        browser.close()
+        self._action(browser.close)
         return {"closed": True}
 
     # --- page helpers (worker thread only) --------------------------------------------------------
@@ -678,7 +715,7 @@ class WebClient:
             (self.js_dialogs if accept else self.js_dialogs_dismissed).append(
                 f"{kind}: {dialog.get('message', '')}"[:300])
             try:
-                page.send("Page.handleJavaScriptDialog", {"accept": accept})
+                self._action(page.send, "Page.handleJavaScriptDialog", {"accept": accept})
             except BrowserError:
                 pass
 
@@ -690,7 +727,7 @@ class WebClient:
             status = self._js("status")
             if status == "signin":
                 raise D365WebError("signin_required",
-                                   f"profile {self.config.profile!r} is not signed in: run 'd365web sign-in' on the VM desktop")
+                                   "Run browser-signin.cmd d365web in the release folder; for a tunnel copy, sign in inside the Edge window this server opens.", status=self._status())
             if status == "idle":
                 calm = calm or time.monotonic()
                 if time.monotonic() - calm >= SETTLE_SECONDS:
@@ -715,7 +752,7 @@ class WebClient:
         page = self._ensure()
         result: dict[str, Any] = {}
         result.update(self._js("state", full, max_rows))
-        unsaved = d365web_model.unsaved_forms(self._js)  # a read: reported by both backends
+        unsaved = d365web_model.unsaved_forms(self._model_js)  # a read: reported by both backends
         if unsaved:
             result["unsaved"] = unsaved
         result.update(self.browser_mode())
@@ -784,25 +821,24 @@ class WebClient:
         if found.get("error"):
             details = {k: v for k, v in found.items() if k != "error" and v not in (None, [], 0)}
             if found.get("reason") == "tab_header_unavailable":
-                raise D365WebError("refused", f"no unique visible header for tab {name!r}; nothing was clicked", **details)
+                raise D365WebError("ambiguous", f"no unique visible header for tab {name!r}; nothing was clicked", status=self._status(), **details)
             hint = ""
             if found.get("hidden_matches"):
                 hint = " (it exists but is hidden: open its action tab or FastTab first)"
             raise D365WebError("not_found", f"no visible {'field' if kind == 'field' else 'control'} {name!r}"
-                               f"{f' #{nth}' if nth else ''} in the current {found.get('scope', 'page')}{hint}", **details)
+                               f"{f' #{nth}' if nth else ''} in the current {found.get('scope', 'page')}{hint}", status=self._status(), **details)
         if found.get("covered"):
             found = self._uncover(name, nth, kind, found, explicit)
         return found
 
-    @staticmethod
-    def _refuse_upload(found: dict[str, Any], name: str, applied: list[dict[str, Any]] | None = None) -> None:
+    def _refuse_upload(self, found: dict[str, Any], name: str, applied: list[dict[str, Any]] | None = None) -> None:
         """A file upload control is not driven: its Browse opens the operating system's file picker, and which
         files of the server machine may be sent to D365 is not d365web's decision."""
         if found.get("upload"):
-            raise D365WebError("refused", f"{name!r} belongs to the file upload control {found['upload']!r}: d365web "
+            raise D365WebError("unsupported", f"{name!r} belongs to the file upload control {found['upload']!r}: d365web "
                                "does not upload files (Browse opens the operating system's file picker); nothing "
                                "was pressed. Cancel the dialog, or upload the file by hand", upload=found["upload"],
-                               **({"applied": list(applied)} if applied is not None else {}))
+                               status=self._status(), **({"applied": list(applied)} if applied is not None else {}))
 
     def _model_may_act(self, found: dict[str, Any]) -> bool:
         """The model backend acts on this control: not on a grid row other than the active one, whose
@@ -819,40 +855,40 @@ class WebClient:
             button = self._js("tipButton", cover["tip"])
             if not button.get("error"):
                 page = self._ensure()
-                page.click(button["x"], button["y"])
+                self._action(page.click, button["x"], button["y"])
                 self._wait_idle()
                 self.dismissed.append(f"{button.get('text', '')} ({button.get('label', '')})".strip())
             found = self._js("locate", name, nth, kind, explicit)
             if found.get("error"):
-                raise D365WebError("not_found", f"{name!r} is gone after dismissing a tip", **found)
+                raise D365WebError("not_found", f"{name!r} is gone after dismissing a tip", status=self._status(), **found)
             if not found.get("covered"):
                 return found
             cover = found["covered"]
         raise D365WebError("covered", f"{name!r} is covered by {cover.get('by')!r}"
                            f"{(': ' + cover['text']) if cover.get('text') else ''}; nothing was clicked",
-                           covered=cover)
+                           covered=cover, status=self._status())
 
     # --- operations (worker thread only) ----------------------------------------------------------
     def _op_open(self, menu_item: str, company: str | None, kind: str | None, guard: bool = True) -> dict[str, Any]:
         page = self._ensure()
         mi = f"{kind}:{menu_item}" if kind and kind != "display" else menu_item
         if not MENU_ITEM.fullmatch(mi):
-            raise D365WebError("refused", f"bad menu item {mi!r}")
+            raise D365WebError("invalid_request", f"bad menu item {mi!r}", status=self._status())
         cmp = (company or self.config.company).lower()
         if cmp and not re.match(r"^[a-z0-9]{1,8}$", cmp):
-            raise D365WebError("refused", f"bad company {cmp!r}")
+            raise D365WebError("invalid_request", f"bad company {cmp!r}", status=self._status())
         query = f"cmp={quote(cmp)}&mi={quote(mi)}" if cmp else f"mi={quote(mi)}"  # no cmp: the user's default
-        unsaved = d365web_model.unsaved_forms(self._js, strict=True) if guard else []
+        unsaved = d365web_model.unsaved_forms(self._model_js, strict=True) if guard else []
         if unsaved is None:
-            raise D365WebError("refused", "cannot tell whether the page holds unsaved changes (D365 did not "
-                               "answer); nothing was opened: check with web_state, then try again")
+            raise D365WebError("unavailable", "cannot tell whether the page holds unsaved changes (D365 did not "
+                               "answer); nothing was opened: check with web_state, then try again", status=self._status())
         if unsaved:
             # Navigating away drops them without D365 asking (live: two sales lines lost, 2026-11-06).
-            raise D365WebError("refused", f"unsaved changes in {', '.join(unsaved)}: save them (web_press "
+            raise D365WebError("conflict", f"unsaved changes in {', '.join(unsaved)}: save them (web_press "
                                "SystemDefinedSaveButton) or leave the form with web_press SystemDefinedCloseButton "
                                "(D365 then saves valid changes and asks about the rest) before opening another page",
-                               unsaved=unsaved)
-        page.navigate(f"{self.config.url}/?{query}")
+                               unsaved=unsaved, status=self._status())
+        self._action(page.navigate, f"{self.config.url}/?{query}")
         time.sleep(0.5)
         return self._after_step([])
 
@@ -864,7 +900,7 @@ class WebClient:
         start = self._js("scope")
         applied: list[dict[str, Any]] = []
         for key, raw in values:
-            name, nth = parse_field_key(key)
+            name, nth = parse_field_key(key, acted=getattr(self, "_acted", False))
             explicit = field_key_explicit(key)
             value = "" if raw is None else str(raw)
             found = self._writable(name, nth, explicit, applied)
@@ -883,10 +919,10 @@ class WebClient:
         self._refuse_upload(found, name, applied)
         if found.get("role") == "ReferenceGroup":
             parts = found.get("parts") or []
-            raise D365WebError("refused", f"{name!r} is a reference group: set its field "
+            raise D365WebError("unsupported", f"{name!r} is a reference group: set its field "
                                f"{' or '.join(repr(p) for p in parts) or '(see web_state fields)'} instead; nothing was "
                                "typed (a click on the group can open the referenced record)", parts=parts,
-                               applied=list(applied))
+                               applied=list(applied), status=self._status())
         deadline = time.monotonic() + READONLY_GRACE
         while found.get("readonly") and time.monotonic() < deadline:  # enabled by an earlier field?
             time.sleep(0.25)
@@ -894,7 +930,7 @@ class WebClient:
         if found.get("readonly"):
             hint = " (a grid line other than the current one: select that line first, web_select_row)" \
                 if found.get("in_row") and not found.get("active_row") else ""
-            raise D365WebError("refused", f"field {name!r} is read-only here{hint}", applied=list(applied))
+            raise D365WebError("conflict", f"field {name!r} is read-only here{hint}", applied=list(applied), status=self._status())
         return found
 
     def _model_set(self, found: dict[str, Any], name: str, value: str,
@@ -905,12 +941,12 @@ class WebClient:
             return "input", False
         if found.get("role") == "ComboBox" and value.strip().lower() == str(found.get("value", "")).strip().lower():
             return "model", False  # nothing to send: a repeated SetSelectedItem would rerun D365's modified()
-        acted = d365web_model.set_value(self._js, found, value, as_bool(value) if found.get("check") else None)
+        acted = d365web_model.set_value(self._model_js, found, value, as_bool(value, acted=getattr(self, "_acted", False)) if found.get("check") else None)
         if acted is None:
             return "input", False
         if acted.get("error") == "no_option":
-            raise D365WebError("refused", f"{name!r} has no option {value!r}",
-                               options=acted.get("options", []), applied=list(applied))
+            raise D365WebError("not_found", f"{name!r} has no option {value!r}",
+                               options=acted.get("options", []), applied=list(applied), status=self._status())
         return "model", bool(acted.get("raw"))
 
     def _input_set(self, page: Page, found: dict[str, Any], name: str, where: tuple[int, bool], value: str,
@@ -919,15 +955,15 @@ class WebClient:
         field clicked, selected, typed and left with Tab."""
         nth, explicit = where
         if found.get("check"):
-            if as_bool(value) != (found.get("value") == "Yes"):
-                page.click(found["x"], found["y"])
+            if as_bool(value, acted=getattr(self, "_acted", False)) != (found.get("value") == "Yes"):
+                self._action(page.click, found["x"], found["y"])
                 self._wait_idle()
                 again = self._js("locate", name, nth, "field", explicit)
-                if not again.get("error") and (again.get("value") == "Yes") != as_bool(value):
+                if not again.get("error") and (again.get("value") == "Yes") != as_bool(value, acted=getattr(self, "_acted", False)):
                     # the click was swallowed (a re-query, a popup): once more, through _locate's checks
                     again = self._locate(name, nth, "field", explicit)
-                    if (again.get("value") == "Yes") != as_bool(value):
-                        page.click(again["x"], again["y"])
+                    if (again.get("value") == "Yes") != as_bool(value, acted=getattr(self, "_acted", False)):
+                        self._action(page.click, again["x"], again["y"])
             return
         if found.get("role") == "ComboBox":  # an enum: pick from its list, typing is ignored
             if value.strip().lower() != str(found.get("value", "")).strip().lower():
@@ -935,17 +971,17 @@ class WebClient:
             return
         if found.get("role") != "MultilineInput" and any(c in value for c in "\r\n\t"):
             # typed, a line break or tab is a key: Enter presses the default button, Tab moves on
-            raise D365WebError("refused", f"{name!r} is a one-line field: the value holds a line "
-                               "break or tab; nothing was typed", applied=list(applied))
-        page.click(found["x"], found["y"])
+            raise D365WebError("invalid_request", f"{name!r} is a one-line field: the value holds a line "
+                               "break or tab; nothing was typed", applied=list(applied), status=self._status())
+        self._action(page.click, found["x"], found["y"])
         time.sleep(0.15)
         self._require_focus(found, name, applied, where)
-        page.key("Ctrl+a")
+        self._action(page.key, "Ctrl+a")
         if value:
-            page.type_text(value)
+            self._action(page.type_text, value)
         else:
-            page.key("Delete")
-        page.key("Tab")
+            self._action(page.key, "Delete")
+        self._action(page.key, "Tab")
 
     def _readback(self, key: str, name: str, where: tuple[int, bool], found: dict[str, Any], value: str,
                   via: str, raw_value: bool) -> dict[str, Any]:
@@ -971,7 +1007,7 @@ class WebClient:
         line["now"] = MASK if hidden else now.get("value", "")
         # A password placeholder or empty readback cannot confirm the value.
         if not hidden and found.get("check"):
-            if (line["now"] == "Yes") != as_bool(value):
+            if (line["now"] == "Yes") != as_bool(value, acted=getattr(self, "_acted", False)):
                 line["differs"] = True  # the checkbox did not take the value, even after a retry
         elif not hidden and value_differs(value, line["now"]):
             # An ISO date set through the model shows in the user's format: compare D365's own value.
@@ -1002,8 +1038,8 @@ class WebClient:
         at = again if isinstance(again, dict) and "x" in again and "y" in again else found
         if self._js("focusedAt", at["x"], at["y"]) is not False:
             return
-        raise D365WebError("refused", f"{name!r} did not take the keyboard focus after the click; nothing was "
-                           "typed (check web_state for a dialog or the active line)", applied=list(applied))
+        raise D365WebError("conflict", f"{name!r} did not take the keyboard focus after the click; nothing was "
+                           "typed (check web_state for a dialog or the active line)", applied=list(applied), status=self._status())
 
     def _wait_list(self, kind: str) -> bool:
         """Let a click open its list before considering a keyboard toggle."""
@@ -1017,15 +1053,15 @@ class WebClient:
         # Escape on a form can mean Back; only send it to an observed open list.
         if self._js("listOpen", kind) is not True:
             return False
-        page.key("Escape")
+        self._action(page.key, "Escape")
         return True
 
     def _pick_combo(self, page: Page, found: dict[str, Any], name: str, value: str,
                     applied: list[dict[str, Any]]) -> None:
-        page.click(found["x"], found["y"])
+        self._action(page.click, found["x"], found["y"])
         time.sleep(0.15)
         if not self._wait_list("combo"):
-            page.key("Alt+ArrowDown")
+            self._action(page.key, "Alt+ArrowDown")
         option: dict[str, Any] = {}
         for _ in range(12):
             time.sleep(0.25)
@@ -1035,11 +1071,11 @@ class WebClient:
         if option.get("error"):
             self._dismiss_list(page, "combo")
             if option["error"] == "covered":  # scrolled to, but something else lies over it: click nothing
-                raise D365WebError("refused", f"{name!r}: option {value!r} is covered in its list",
-                                   applied=list(applied))
-            raise D365WebError("refused", f"{name!r} has no option {value!r}",
-                               options=option.get("options", []), applied=list(applied))
-        page.click(option["x"], option["y"])
+                raise D365WebError("covered", f"{name!r}: option {value!r} is covered in its list",
+                                   applied=list(applied), status=self._status())
+            raise D365WebError("not_found", f"{name!r} has no option {value!r}",
+                               options=option.get("options", []), applied=list(applied), status=self._status())
+        self._action(page.click, option["x"], option["y"])
 
     def _op_press(self, name: str, nth: int) -> dict[str, Any]:
         page = self._ensure()
@@ -1047,12 +1083,12 @@ class WebClient:
         found = self._locate(name, nth, "any")
         self._refuse_upload(found, name)
         if found.get("enabled") is False:
-            raise D365WebError("refused", f"{name!r} is disabled")
+            raise D365WebError("conflict", f"{name!r} is disabled", status=self._status())
         extra: dict[str, Any] = {}
         context = self._context()  # dispatch and idle are not proof that anything happened: compare after
-        acted = d365web_model.press(self._js, found) if self._model_may_act(found) else None
+        acted = d365web_model.press(self._model_js, found) if self._model_may_act(found) else None
         if acted is None:
-            page.click(found["x"], found["y"])
+            self._action(page.click, found["x"], found["y"])
             time.sleep(0.2)
         if self.config.backend == "model":
             extra["via"] = "model" if acted is not None else "input"
@@ -1064,7 +1100,7 @@ class WebClient:
         page = self._ensure()
         before = self._js("messages")
         for combo in keys.split():
-            page.key(combo)
+            self._action(page.key, combo)
             time.sleep(0.1)
         return self._after_step(before)
 
@@ -1076,14 +1112,14 @@ class WebClient:
         if model and self._js("scope")["scope"] != "lookup":
             found = self._locate(name, nth, "field", explicit)
             model = self._model_may_act(found)
-            if model and d365web_model.open_lookup(self._js, found):
+            if model and d365web_model.open_lookup(self._model_js, found):
                 self._wait_idle()
         if model:
             if self._js("scope")["scope"] == "lookup":
                 if pick is None:
                     return self._after_step(before, via="model")
                 deadline = time.monotonic() + self.config.step_timeout
-                found = d365web_model.pick_lookup_row(self._js, pick, self._wait_idle, GRID_SCAN_CAP,
+                found = d365web_model.pick_lookup_row(self._model_js, pick, self._wait_idle, GRID_SCAN_CAP,
                                                       lambda: time.monotonic() < deadline)
                 if found.get("ambiguous"):
                     self._refuse_ambiguous_pick(page, pick, {"matches": found["ambiguous"]})
@@ -1096,9 +1132,9 @@ class WebClient:
                 if found.get("complete") and shown.get("error"):
                     # Every row searched, by value and by shown text: refuse without typing into the field.
                     rows = self._js("grid", "", 10)
-                    if d365web_model.cancel_lookup(self._js):
+                    if d365web_model.cancel_lookup(self._model_js):
                         self._wait_idle()
-                    raise D365WebError("not_found", f"no lookup row with a value {pick!r}", lookup=rows)
+                    raise D365WebError("not_found", f"no lookup row with a value {pick!r}", lookup=rows, status=self._status())
             # Not opened, or the value may be a shown text only: the input path below (it types to filter).
         if self._js("scope")["scope"] != "lookup":
             self._open_lookup(page, name, nth, None, explicit)
@@ -1123,8 +1159,8 @@ class WebClient:
                 shown = now.get("value") if isinstance(now, dict) and not now.get("error") else None
                 raise D365WebError("not_found", f"no lookup row with a value {pick!r}" + (
                     f"; the field now holds {shown!r} (the filter text typed into it): check or set it" if shown else ""),
-                    lookup=rows, **({"now": shown} if shown is not None else {}))
-        page.click(target["x"], target["y"])
+                    lookup=rows, status=self._status(), **({"now": shown} if shown is not None else {}))
+        self._action(page.click, target["x"], target["y"])
         self._wait_idle()
         now = self._js("locate", name, nth, "field", explicit)  # what the field holds after the pick
         shown = {"now": now.get("value", "")} if isinstance(now, dict) and not now.get("error") \
@@ -1134,7 +1170,7 @@ class WebClient:
     def _refuse_ambiguous_pick(self, page: Page, pick: str, target: dict[str, Any],
                                field: tuple[str, int, bool] | None = None) -> None:
         rows = self._js("grid", "", 10)
-        if not d365web_model.cancel_lookup(self._js):
+        if not d365web_model.cancel_lookup(self._model_js):
             self._dismiss_list(page, "lookup")
         self._wait_idle()
         now: dict[str, Any] = {}
@@ -1142,10 +1178,10 @@ class WebClient:
             found = self._js("locate", *field[:2], "field", field[2])
             if isinstance(found, dict) and not found.get("error") and not found.get("password"):
                 now = {"now": found.get("value", "")}
-        raise D365WebError("refused", f"{target.get('matches', 'several')} lookup rows hold {pick!r}; nothing was "
+        raise D365WebError("ambiguous", f"{target.get('matches', 'several')} lookup rows hold {pick!r}; nothing was "
                            "picked: give a value only one row holds (the key column)" +
                            (f"; the field now holds {now['now']!r} (the filter text): check or set it" if now else ""),
-                           lookup=rows, matches=target.get("matches"), **now)
+                           lookup=rows, matches=target.get("matches"), status=self._status(), **now)
 
     def _lookup_readback(self, name: str, nth: int, explicit: bool, picked: dict[str, Any]) -> dict[str, Any]:
         """The field after a model pick: `now`, and `differs` when it holds none of the picked row's values."""
@@ -1160,20 +1196,20 @@ class WebClient:
 
     def _open_lookup(self, page: Page, name: str, nth: int, typed: str | None, explicit: bool = False) -> None:
         found = self._locate(name, nth, "field", explicit)
-        page.click(found["x"], found["y"])
+        self._action(page.click, found["x"], found["y"])
         time.sleep(0.15)
         if typed is not None:
             # A click may already have opened it; return focus to the field before filtering.
             if self._dismiss_list(page, "lookup"):
                 self._wait_idle()
-            page.key("Ctrl+a")
-            page.type_text(typed)
+            self._action(page.key, "Ctrl+a")
+            self._action(page.type_text, typed)
         if not self._wait_list("lookup"):
-            page.key("Alt+ArrowDown")
+            self._action(page.key, "Alt+ArrowDown")
         time.sleep(0.2)
         self._wait_idle()
         if self._js("scope")["scope"] != "lookup":
-            raise D365WebError("no_lookup", f"{name!r} did not open a lookup (Alt+Down)")
+            raise D365WebError("no_lookup", f"{name!r} did not open a lookup (Alt+Down)", status=self._status())
 
     def _op_scenario(self, steps: list[dict[str, Any]], variables: dict[str, Any] | None,
                      stop_on_mismatch: bool, full_final: bool = False) -> dict[str, Any]:
@@ -1259,7 +1295,7 @@ class WebClient:
             return self._op_key(args["keys"])
         if op == "tree":
             return self._op_tree(args.get("tree") or "", list(args["path"]))
-        raise D365WebError("refused", f"unknown op {op!r}")
+        raise D365WebError("invalid_request", f"unknown op {op!r}", status=self._status())
 
     def _op_filter(self, value: str, column: str | None) -> dict[str, Any]:
         page = self._ensure()
@@ -1267,24 +1303,24 @@ class WebClient:
         if self.config.backend == "model":
             sc = self._js("scope")
             form = sc.get("form", "") if isinstance(sc, dict) and sc.get("scope") != "page" else ""
-            done = d365web_model.filter_grid(self._js, value, column, form)  # a column name or its label
+            done = d365web_model.filter_grid(self._model_js, value, column, form)  # a column name or its label
             if done and done.get("error") == "no_column":
-                raise D365WebError("not_found", f"the quick filter offers no column {column!r}", columns=done.get("columns", []))
+                raise D365WebError("not_found", f"the quick filter offers no column {column!r}", columns=done.get("columns", []), status=self._status())
             if done:
                 info = {"cleared": True} if done.get("cleared") else {"column": done.get("column", column), "value": value}
                 return self._after_step(before, filter=info, via="model")
         box = self._js("quickfilter")
         if box.get("error"):
             raise D365WebError("not_found", "no quick filter in the current scope",
-                               **{k: v for k, v in box.items() if k != "error"})
-        page.click(box["x"], box["y"])
+                               status=self._status(), **{k: v for k, v in box.items() if k != "error"})
+        self._action(page.click, box["x"], box["y"])
         time.sleep(0.15)
-        page.key("Ctrl+a")
+        self._action(page.key, "Ctrl+a")
         if not value:
-            page.key("Delete")
-            page.key("Enter")
+            self._action(page.key, "Delete")
+            self._action(page.key, "Enter")
             return self._after_step(before, filter={"cleared": True})
-        page.type_text(value)
+        self._action(page.type_text, value)
         option: dict[str, Any] = {}
         deadline = time.monotonic() + 5.0
         while time.monotonic() < deadline:
@@ -1295,8 +1331,8 @@ class WebClient:
         if option.get("error"):
             self._dismiss_list(page, "filter")
             raise D365WebError("not_found", f"the quick filter offers no column {column!r}",
-                               columns=option.get("columns", []))
-        page.click(option["x"], option["y"])
+                               columns=option.get("columns", []), status=self._status())
+        self._action(page.click, option["x"], option["y"])
         return self._after_step(before, filter={"column": option["column"], "value": value})
 
     def _column_label(self, column: str | None) -> str:
@@ -1329,7 +1365,7 @@ class WebClient:
         values) until the end, GRID_SCAN_CAP rows, or stop(rows, columns) is true. complete: the end was reached."""
         first = self._js("grid", grid, 200)
         if first.get("error"):
-            raise D365WebError("not_found", f"no visible grid {grid!r}", **{k: v for k, v in first.items() if k != "error"})
+            raise D365WebError("not_found", f"no visible grid {grid!r}", status=self._status(), **{k: v for k, v in first.items() if k != "error"})
         rows: dict[str, dict[str, Any]] = {}
 
         def add(result: dict[str, Any]) -> int:
@@ -1340,7 +1376,7 @@ class WebClient:
                     rows[key] = row
             return len(rows) - before
 
-        top = self._js("gridScroll", grid, "top")
+        top = self._scroll_grid(grid, "top")
         if top.get("scrollable"):
             self._wait_idle()
             first = self._js("grid", grid, 200)
@@ -1368,7 +1404,7 @@ class WebClient:
         loading the next block), the cap or stop. True: the bottom was reached."""
         still = 0
         while len(rows) < GRID_SCAN_CAP and not stopped():
-            step = self._js("gridScroll", grid, "down")
+            step = self._scroll_grid(grid, "down")
             self._wait_idle()
             gained = add(self._js("grid", grid, 200))
             if step.get("after", 0) <= step.get("before", 0) and not gained:
@@ -1386,11 +1422,11 @@ class WebClient:
         deadline = time.monotonic() + self.config.step_timeout
         sc = self._js("scope")
         form = sc.get("form", "") if isinstance(sc, dict) and sc.get("scope") != "page" else ""
-        pages = d365web_model.load_all_pages(self._js, name, self._wait_idle, GRID_SCAN_CAP,
+        pages = d365web_model.load_all_pages(self._model_js, name, self._wait_idle, GRID_SCAN_CAP,
                                              lambda: time.monotonic() < deadline, form)
         complete = True
         if pages and pages.get("pages"):
-            self._js("gridScroll", grid, "top")
+            self._scroll_grid(grid, "top")
             self._wait_idle()
             complete = self._scroll_collect(grid, add, rows, stopped)
             hint = self._js("grid", grid, 200).get("rowcount_hint") or hint
@@ -1406,7 +1442,7 @@ class WebClient:
         if last.get("error"):
             return True, False
         page = self._ensure()
-        page.click(last["x"], last["y"])
+        self._action(page.click, last["x"], last["y"])
         rest = self._js("restPoint")
         if not rest.get("error"):
             page.move(rest["x"], rest["y"])
@@ -1415,7 +1451,7 @@ class WebClient:
         while not stopped():  # also after the last block came
             if len(rows) >= min(hint - 1, GRID_SCAN_CAP):
                 break
-            page.key("PageDown")
+            self._action(page.key, "PageDown")
             time.sleep(0.2)
             self._wait_idle()
             if add(self._js("grid", grid, 200)):
@@ -1446,18 +1482,18 @@ class WebClient:
             else:
                 target = dict(target, searched_rows=searched, truncated=scan["truncated"])
         if target.get("error") == "ambiguous":
-            raise D365WebError("refused", f"{target.get('matches')} rows of grid {target.get('grid')!r} match; "
-                               "nothing was selected: narrow the match", **{k: v for k, v in target.items() if k != "error"})
+            raise D365WebError("ambiguous", f"{target.get('matches')} rows of grid {target.get('grid')!r} match; "
+                               "nothing was selected: narrow the match", status=self._status(), **{k: v for k, v in target.items() if k != "error"})
         if target.get("error") == "links_only":
-            raise D365WebError("refused", f"row {target['row']} of grid {target['grid']!r} has only hyperlink cells: "
+            raise D365WebError("unsupported", f"row {target['row']} of grid {target['grid']!r} has only hyperlink cells: "
                                "a click would open the record, not select the row; filter the list to it instead",
-                               **{k: v for k, v in target.items() if k != "error"})
+                               status=self._status(), **{k: v for k, v in target.items() if k != "error"})
         if target.get("error"):
             raise D365WebError("not_found", f"no {'matching ' if match else ''}row in grid {grid or '(largest)'!r}"
                                + (f" (searched {searched} rows, scrolling)" if searched is not None else ""),
-                               **{k: v for k, v in target.items() if k != "error"})
+                               status=self._status(), **{k: v for k, v in target.items() if k != "error"})
         context = self._context()
-        page.click(target["x"], target["y"])
+        self._action(page.click, target["x"], target["y"])
         # the pointer leaves the row for an inert spot of the form: resting on a linked record opens D365's
         # hover preview over the form (test box, 2026-10-26: the setup form's menu list); the page corner is
         # no good either, its Office 365 launcher shows a tooltip over the action pane
@@ -1503,11 +1539,11 @@ class WebClient:
                 parent = node["id"]
                 continue  # already selected, or expanded (or a leaf, which the next label then misses)
             if action == "expand" and "bx" not in node:
-                raise D365WebError("refused", f"tree node {label!r} shows no expand button; nothing was clicked",
-                                   tree=tree, path=path[:depth + 1])
+                raise D365WebError("unsupported", f"tree node {label!r} shows no expand button; nothing was clicked",
+                                   tree=tree, path=path[:depth + 1], status=self._status())
             # Clicks, as a person: the tree's viewmodel commands take node objects the page does not hand
             # out (its node data is plain, live 10.0.49), so the model has nothing safe to call here.
-            page.click(*((node["bx"], node["by"]) if action == "expand" else (node["x"], node["y"])))
+            self._action(page.click, *((node["bx"], node["by"]) if action == "expand" else (node["x"], node["y"])))
             acted = True
             self._wait_idle()
             parent = node["id"]
@@ -1524,7 +1560,7 @@ class WebClient:
         while True:
             node = self._js("treeNode", tree, parent, label)
             if not isinstance(node, dict):
-                raise D365WebError("not_found", "the page did not answer for the tree")
+                raise D365WebError("not_found", "the page did not answer for the tree", status=self._status())
             if not node.get("error"):
                 return node
             if node.get("error") == "ambiguous" or node.get("what") == "tree" or time.monotonic() >= deadline:
@@ -1535,17 +1571,17 @@ class WebClient:
         if node.get("what") == "tree":
             message = ("more than one tree here: name one (tree)" if node["error"] == "ambiguous"
                        else f"no visible tree {tree!r} in the current {node.get('scope', 'page')}")
-            raise D365WebError("refused" if node["error"] == "ambiguous" else "not_found", message, **details)
+            raise D365WebError("ambiguous" if node["error"] == "ambiguous" else "not_found", message, status=self._status(), **details)
         if node["error"] == "ambiguous":
-            raise D365WebError("refused", f"more than one tree node {label!r}{where}; nothing was selected", **details)
-        raise D365WebError("not_found", f"no tree node {label!r}{where}", **details)
+            raise D365WebError("ambiguous", f"more than one tree node {label!r}{where}; nothing was selected", status=self._status(), **details)
+        raise D365WebError("not_found", f"no tree node {label!r}{where}", status=self._status(), **details)
 
     def _op_grid(self, grid: str, max_rows: int, start_row: int = 0, all_rows: bool = False) -> dict[str, Any]:
         self._ensure()
         if not all_rows and start_row == 0:
             result = self._js("grid", grid, max_rows)
             if result.get("error"):
-                raise D365WebError("not_found", f"no visible grid {grid!r}", **{k: v for k, v in result.items() if k != "error"})
+                raise D365WebError("not_found", f"no visible grid {grid!r}", status=self._status(), **{k: v for k, v in result.items() if k != "error"})
             return result
         want = None if all_rows else start_row + max_rows + 1
         scan = self._scan_grid(grid, stop=(lambda rows, columns: len(rows) >= want) if want else None)
@@ -1563,13 +1599,13 @@ class WebClient:
     def _op_click(self, x: float, y: float) -> dict[str, Any]:
         page = self._ensure()
         before = self._js("messages")
-        page.click(x, y)
+        self._action(page.click, x, y)
         return self._after_step(before)
 
     def _op_type(self, text: str) -> dict[str, Any]:
         page = self._ensure()
         before = self._js("messages")
-        page.type_text(text)
+        self._action(page.type_text, text)
         return self._after_step(before)
 
     def _op_screenshot(self) -> dict[str, Any]:
@@ -1628,7 +1664,7 @@ class WebClient:
 
     def grid(self, grid: str = "", max_rows: int = 50, start_row: int = 0, all_rows: bool = False) -> dict[str, Any]:
         if start_row < 0:
-            raise D365WebError("refused", "start_row must be 0 or more")
+            raise D365WebError("invalid_request", "start_row must be 0 or more", status='refused')
         return self.call("web_grid", lambda: self._op_grid(grid, max_rows, start_row, all_rows))
 
     def click(self, x: float, y: float) -> dict[str, Any]:

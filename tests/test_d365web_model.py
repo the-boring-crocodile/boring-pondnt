@@ -282,7 +282,7 @@ def test_open_refuses_while_d365_reports_unsaved_changes(monkeypatch):
     page.navigate = lambda url: page.events.append(("navigate", url))
     with pytest.raises(D365WebError) as raised:
         web._op_open("CustTable", "usmf", None)
-    assert raised.value.code == "refused" and raised.value.details["unsaved"] == ["SalesTable"]
+    assert raised.value.code == "conflict" and raised.value.details["unsaved"] == ["SalesTable"]
     assert page.events == []
 
 
@@ -481,7 +481,7 @@ def test_the_unsaved_guard_refuses_to_open_when_it_cannot_read_the_page(monkeypa
     page.navigate = lambda url: page.events.append(("navigate", url))
     with pytest.raises(D365WebError) as caught:
         web._op_open("CustTable", "usmf", None)
-    assert caught.value.code == "refused" and not any(e[0] == "navigate" for e in page.events)
+    assert caught.value.code == "unavailable" and not any(e[0] == "navigate" for e in page.events)
 
 
 def test_the_idle_close_keeps_a_browser_with_unsaved_changes(monkeypatch):
@@ -518,7 +518,7 @@ def test_an_ambiguous_model_lookup_pick_is_refused_without_the_input_path(monkey
     web, page, calls = lookup_client(monkeypatch, [{"fallback": "more than one", "ambiguous": 2, "rows": 9}])
     with pytest.raises(D365WebError) as caught:
         web._op_lookup("WhenItem_ItemId", None, "Bolt")
-    assert caught.value.code == "refused" and caught.value.details["matches"] == 2
+    assert caught.value.code == "ambiguous" and caught.value.details["matches"] == 2
     assert page.events == [] and not any(op == "row" for op, _ in calls)
 
 
@@ -528,7 +528,7 @@ def test_nothing_is_typed_when_the_clicked_field_has_no_focus(monkeypatch):
     monkeypatch.setattr(web, "_js", lambda op, *a: False if op == "focusedAt" else inner(op, *a))
     with pytest.raises(D365WebError) as caught:
         web._op_set([("Field1", "after")])
-    assert caught.value.code == "refused" and page.events == [("click", 10, 20)]
+    assert caught.value.code == "conflict" and page.events == [("click", 10, 20)]
 
 
 def test_a_line_break_is_never_typed_into_a_one_line_field(monkeypatch):

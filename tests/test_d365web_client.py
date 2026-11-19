@@ -18,7 +18,7 @@ from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
-from boring_pondnt.d365web_browser import Browser, launch_args
+from boring_pondnt.d365web_browser import Browser, BrowserError, launch_args
 from boring_pondnt.d365web_client import (MENU_ITEM, Config, D365WebError, StillRunning, WebClient, as_bool,
                                           normalize_values, parse_field_key, value_differs)
 
@@ -26,6 +26,19 @@ FAKE = Path(__file__).parent / "d365web_fake"
 
 
 # --- units -------------------------------------------------------------------------------------------
+
+def test_signin_required_names_the_shipped_helper_and_tunnel_edge(monkeypatch):
+    web = WebClient(Config(url="https://example.test"))
+    monkeypatch.setattr(web, "_accept_js_dialogs", lambda: None)
+    monkeypatch.setattr(web, "_js", lambda *args: "signin")
+    monkeypatch.setattr(web, "_status", lambda: "refused")
+    with pytest.raises(D365WebError) as caught:
+        web._wait_idle()
+    assert caught.value.code == "signin_required"
+    assert caught.value.status == "refused"
+    assert "browser-signin.cmd d365web" in str(caught.value)
+    assert "Edge window this server opens" in str(caught.value)
+
 
 def test_launch_args_keep_a_visible_window_rendering(tmp_path):
     """A visible Edge nobody sees must keep rendering (2026-10-30: clicks after open were lost on a test box)."""
@@ -198,7 +211,7 @@ def test_budget_running_wait_and_busy():
 def test_errors_surface_from_the_worker():
     client = WebClient(Config(url="https://aos"))
     def fail():
-        raise D365WebError("not_found", "no visible field 'X'", similar=["Y"])
+        raise D365WebError("not_found", "no visible field 'X'", similar=["Y"], status='refused')
     with pytest.raises(D365WebError) as error:
         client.call("web_set", fail)
     assert error.value.details == {"similar": ["Y"]}
@@ -242,7 +255,7 @@ def test_a_finished_error_is_kept_until_web_wait_and_collected_once():
     client = WebClient(Config(url="https://aos"), budget=0.2)
 
     def fail():
-        raise D365WebError("browser", "posting outcome unknown", browser_code="closed")
+        raise D365WebError("browser", "posting outcome unknown", browser_code="closed", status='failed')
     _finished_uncollected(client, "web_press", fail)
     with pytest.raises(D365WebError) as busy:
         client.call("web_state", lambda: {"state": 1})
@@ -288,8 +301,24 @@ class _Quiet(http.server.SimpleHTTPRequestHandler):
         super().do_GET()
 
 
+def _no_sandbox_args():
+    return ("--no-sandbox",) if hasattr(os, "geteuid") and os.geteuid() == 0 else ()
+
+
 @pytest.fixture(scope="module")
-def site():
+def warm_browser(tmp_path_factory):
+    """Start and close the browser once, untimed: a fresh CI machine's first start also builds
+    the browser's caches, which must not count against the 20 s budget of the first test."""
+    if BROWSER is not None:
+        try:
+            Browser.launch(tmp_path_factory.mktemp("warm") / "profile", headless=True, edge=BROWSER,
+                           extra_args=_no_sandbox_args()).close()
+        except (BrowserError, OSError):
+            pass  # the timed tests report a browser that cannot start
+
+
+@pytest.fixture(scope="module")
+def site(warm_browser):
     server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), functools.partial(_Quiet, directory=str(FAKE)))
     threading.Thread(target=server.serve_forever, daemon=True).start()
     yield f"http://127.0.0.1:{server.server_address[1]}"
@@ -298,8 +327,7 @@ def site():
 
 def _fake_client(site, tmp_path, backend):
     def launch(config):
-        args = ("--no-sandbox",) if hasattr(os, "geteuid") and os.geteuid() == 0 else ()
-        return Browser.launch(tmp_path / "profile", headless=True, edge=BROWSER, extra_args=args)
+        return Browser.launch(tmp_path / "profile", headless=True, edge=BROWSER, extra_args=_no_sandbox_args())
     return WebClient(Config(url=site, step_timeout=10, backend=backend), browser_factory=launch, budget=20,
                      state_dir=tmp_path)
 
@@ -380,7 +408,7 @@ def test_set_reads_back_and_reports_new_messages(client):
     assert state["new_messages"][0]["severity"] == "warning" and "'ZZZZ'" in state["new_messages"][0]["text"]
     with pytest.raises(D365WebError) as error:
         client.set({"VendorName": "x"})
-    assert error.value.code == "refused" and "read-only" in error.value.message
+    assert error.value.code == "conflict" and "read-only" in error.value.message
     with pytest.raises(D365WebError) as error:
         client.set({"Vendor": "x"})
     assert error.value.code == "not_found" and "OrderAccount (Vendor account)" in error.value.details["similar"]
@@ -513,7 +541,7 @@ def test_a_reference_group_names_its_fields_and_is_not_clicked(client):
     assert client.state()["fields"]["Worker_Name"] == "Julia"
     with pytest.raises(D365WebError) as error:
         client.set({"Worker": "Lars"})
-    assert error.value.code == "refused" and error.value.details["parts"] == ["Worker_Name"]
+    assert error.value.code == "unsupported" and error.value.details["parts"] == ["Worker_Name"]
     assert client.call("clicked", lambda: client._ensure().evaluate("!!window.clicked")) is False
 
 
@@ -534,7 +562,7 @@ def test_a_file_upload_is_listed_and_refused(client):
     assert state["scope"] == "dialog" and state["uploads"] == ["UploadControl"]
     with pytest.raises(D365WebError) as error:
         client.press("Browse")
-    assert error.value.code == "refused" and error.value.details["upload"] == "UploadControl"
+    assert error.value.code == "unsupported" and error.value.details["upload"] == "UploadControl"
     assert client.call("browsed", lambda: client._ensure().evaluate("!!window.browsed")) is False
     assert client.press("Cancel")["scope"] == "form"
 
@@ -549,7 +577,7 @@ def test_progress_dialog_counts_as_busy(client):
     assert state["messages"] == []  # not repeated
     with pytest.raises(D365WebError) as error:
         client.press("buttonNever")
-    assert error.value.code == "refused"
+    assert error.value.code == "conflict"
 
 
 @needs_browser
@@ -599,7 +627,7 @@ def test_combo_box_picks_from_its_list(client):
     assert state["applied"] == [{"field": "Unitization", "value": "None", "now": "None"}]
     with pytest.raises(D365WebError) as error:
         client.set({"Unitization": "Pallets"})
-    assert error.value.code == "refused" and error.value.details["options"] == ["None", "License plate grouping", "User defined"]
+    assert error.value.code == "not_found" and error.value.details["options"] == ["None", "License plate grouping", "User defined"]
     assert client.state()["fields"]["Unitization"] == "None"
 
 
@@ -699,7 +727,7 @@ def test_pinned_and_detached_action_pane_share_discovery_and_targeting(pane_clie
     assert error.value.code == "not_found"
     with pytest.raises(D365WebError) as error:
         client.press("DisabledAction")
-    assert error.value.code == "refused"
+    assert error.value.code == "conflict"
     client.press("TogglePin")
     client.call("fixture", lambda: client._ensure().evaluate("document.getElementById('result').value = ''"))
     assert client.state()["buttons"].count("ViewHistory") == 1  # moved back, no duplicate root
@@ -770,7 +798,7 @@ def test_tab_with_no_unique_visible_own_header_refuses_without_clicking(tab_clie
     client.call("fixture", lambda: client._ensure().evaluate("(()=>{" + change + "})()"))
     with pytest.raises(D365WebError) as error:
         client.press("UsersTabPage")
-    assert error.value.code == "refused"
+    assert error.value.code == "ambiguous"
     assert error.value.details["reason"] == "tab_header_unavailable"
     assert client.state()["form"] == "TabFixture" and client.state()["readonly"]["Result"] == ""
 
@@ -781,7 +809,7 @@ def test_disabled_tab_header_refuses_and_ordinary_nested_link_still_works(tab_cl
     client.call("fixture", lambda: client._ensure().evaluate("document.getElementById('header').disabled=true"))
     with pytest.raises(D365WebError) as error:
         client.press("UsersTabPage")
-    assert error.value.code == "refused" and client.state()["readonly"]["Result"] == ""
+    assert error.value.code == "conflict" and client.state()["readonly"]["Result"] == ""
     state = client.press("LinkedUser")
     assert state["form"] == "LinkedUserForm" and state["readonly"]["Result"] == "linked-user"
 
@@ -863,7 +891,7 @@ def test_pivot_without_visible_same_scope_associated_header_refuses(pivot_client
     client.call("fixture", lambda: client._ensure().evaluate("(()=>{" + change + "})()"))
     with pytest.raises(D365WebError) as error:
         client.press("UsersTabPage")
-    assert error.value.code == "refused"
+    assert error.value.code == "ambiguous"
     assert error.value.details["reason"] == "tab_header_unavailable"
     assert client.state()["form"] == "TabFixture" and client.state()["readonly"]["Result"] == ""
 
@@ -874,7 +902,7 @@ def test_disabled_pivot_header_refuses_and_explicit_record_link_still_works(pivo
     client.call("fixture", lambda: client._ensure().evaluate("document.getElementById('header').disabled=true"))
     with pytest.raises(D365WebError) as error:
         client.press("UsersTabPage")
-    assert error.value.code == "refused" and client.state()["readonly"]["Result"] == ""
+    assert error.value.code == "conflict" and client.state()["readonly"]["Result"] == ""
     assert client.press("LinkedUser")["form"] == "LinkedUserForm"
 
 
@@ -981,7 +1009,7 @@ def test_a_row_of_only_hyperlinks_is_selected_beside_the_link_or_refused(client)
     assert client.state()["scope"] == "form"  # the pointer left the row: no hover preview in the way
     with pytest.raises(D365WebError) as error:
         client.select_row("WideLinkList", 0)
-    assert error.value.code == "refused" and "only hyperlink cells" in error.value.message
+    assert error.value.code == "unsupported" and "only hyperlink cells" in error.value.message
     assert "new_messages" not in client.state()
 
 
@@ -1129,7 +1157,7 @@ def test_model_backend_without_viewmodels_falls_back_per_step(model_client):
     assert state["applied"] == [{"field": "Unitization", "value": "None", "via": "input", "now": "None"}]
     with pytest.raises(D365WebError) as error:
         model_client.set({"Unitization": "Pallets"})
-    assert error.value.code == "refused"
+    assert error.value.code == "not_found"
     model_client.open("DemoKeyLog")
     grid = model_client.grid("KeyGrid", max_rows=50, all_rows=True)
     assert len(grid["rows"]) == 30 and grid["more"] is True  # 45 exist: say so, never press PageDown

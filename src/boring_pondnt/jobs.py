@@ -80,7 +80,8 @@ class Job:
     directory: Path
     started: float
     tree: Tree | None = None
-    state: str = "running"  # running, stopping, exited, timed_out, stopped, failed
+    state: str = "running"  # running, stopping, completed, cancelled, failed
+    timed_out: bool = False
     exit_code: int | None = None
     ended: float | None = None
     done: threading.Event = field(default_factory=threading.Event)
@@ -95,6 +96,7 @@ class Job:
             "job_id": self.job_id,
             "state": self.state,
             "exit_code": self.exit_code,
+            "timed_out": self.timed_out,
             "command": self.command if len(self.command) <= 200 else self.command[:200] + "...",
             "shell": self.shell,
             "cwd": self.cwd,
@@ -185,14 +187,28 @@ class Jobs(ProcessJobs[Job]):
         return self._get(job_id).status()
 
     def wait(self, job_ids: list[str], wait_seconds: float = 30.0) -> dict[str, Any]:
-        """Wait until every listed job has ended, or `wait_seconds` pass."""
+        """Wait for settlement; unknown IDs are per-job refusals, not a failed wait."""
         check_wait(job_ids, wait_seconds)
-        jobs = [self._get(job_id) for job_id in job_ids]
-        deadline = time.monotonic() + wait_seconds
-        for job in jobs:
-            job.done.wait(max(0.0, deadline - time.monotonic()))
-        return {"jobs": [job.status() for job in jobs],
-                "all_ended": all(job.done.is_set() for job in jobs)}
+        started = time.monotonic()
+        deadline = started + wait_seconds
+        records, answers = [], []
+        for job_id in job_ids:
+            try:
+                job = self._get(job_id)
+            except Refused as refusal:
+                records.append(None)
+                answers.append({"job_id": job_id, "refusal": refusal.as_data()})
+            else:
+                records.append(job)
+                answers.append(None)
+        for job in records:
+            if job is not None:
+                job.done.wait(max(0.0, deadline - time.monotonic()))
+        settled = all(job is None or job.done.is_set() for job in records)
+        return {"jobs": [job.status() if job is not None else answer
+                         for job, answer in zip(records, answers)],
+                "settled": settled, "wait_expired": not settled,
+                "elapsed_seconds": round(time.monotonic() - started, 3)}
 
     def output(self, job_id: str, stream: str = "stdout", tail_lines: int | None = None,
                start_line: int | None = None, line_count: int = OUTPUT_LINES_DEFAULT) -> dict[str, Any]:

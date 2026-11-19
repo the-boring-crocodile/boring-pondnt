@@ -40,7 +40,6 @@ INSTRUCTIONS = (
     "status=running: call web_wait; until web_wait has returned its result, every other call is refused "
     "as busy, even after the step finished. Steps change real data in the connected D365."
 )
-REFUSAL_CODES = {"refused", "busy", "not_found", "no_lookup", "no_session", "covered"}
 BUDGET_MARGIN = 3.0
 
 
@@ -49,7 +48,7 @@ CALL_LOG = "calls-d365web.jsonl"
 
 
 def _outcome(error: D365WebError) -> Outcome:
-    cls = Refused if error.code in REFUSAL_CODES else Failed
+    cls = Refused if error.status == "refused" else Failed
     return cls(error.code, error.message, **error.details)
 
 
@@ -303,7 +302,7 @@ def main(argv: list[str] | None = None) -> None:
                                  call_budget=config.call_limit, **(auth or {}))
         config.serve(make_server)
     except Outcome as outcome:
-        print(json.dumps(outcome.as_dict()), file=sys.stderr)
+        print(json.dumps(outcome.as_data()), file=sys.stderr)
         raise SystemExit(2) from None
     except (OSError, ValueError, KeyError, TypeError) as exc:
         print(json.dumps({"status": "failed", "code": "config", "message": str(exc)}), file=sys.stderr)

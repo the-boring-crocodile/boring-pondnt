@@ -45,7 +45,7 @@ def test_remaining_budget_reaches_each_waiting_owner(tmp_path, monkeypatch):
     def wait(self, ids, seconds):
         budgets.append(("wait", seconds))
         now[0] += seconds
-        return {"all_ended": False}
+        return {"settled": False, "wait_expired": True}
     monkeypatch.setattr(execs, "run", command)
     monkeypatch.setattr(jobs.Jobs, "wait", wait)
     app = server.create_server(state_dir=tmp_path / "state")
@@ -59,7 +59,7 @@ def test_remaining_budget_reaches_each_waiting_owner(tmp_path, monkeypatch):
     assert budgets[1][0] == "wait"
     assert budgets[1][1] == pytest.approx(0.4)
     assert data["results"][-1]["status"] == "not_started"
-    assert data["stop_reason"] == "timeout"
+    assert data["stop_reason"] == "deadline"
 
 
 @pytest.mark.parametrize("method", [[], {}])
@@ -123,7 +123,7 @@ def test_stateless_options_refuse_before_any_step(tmp_path, method, arguments):
         {"id": "bad", "method": method, "arguments": arguments},
     ], on_error="continue")
     assert error and data["code"] == "invalid_request"
-    assert data["details"]["step"] == "bad"
+    assert data["step"] == "bad"
     assert not target.exists() and not state.exists()
 
 

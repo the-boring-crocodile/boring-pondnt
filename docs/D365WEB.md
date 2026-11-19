@@ -33,8 +33,10 @@ what to do when a call returns before the UI settles.
    intended development/test environment and an existing company first;
    `usmf` below is a Contoso example.
 2. **Sign the profile in once**, on the machine's desktop (an interactive session, not over SSH).
-   The short way: double-click `browser-signin.cmd` in the release folder, as
-   yourself. It asks for the service, suggests the AOS address from the box's
+   Run `browser-signin.cmd d365web` in the release folder, as yourself.
+   For a tunnel copy, sign in inside the Edge window its server opens
+   ([tunnel sign-in](DEVBOX_TUNNEL.md#windows-choose-servers-and-their-own-d365-state)).
+   The helper suggests the AOS address from the box's
    `web.config`, asks for the company, writes `d365web.json` (step 3) when there
    is none, and opens Edge with the profile; an existing `d365web.json` is used
    and left alone. By hand:
@@ -72,9 +74,9 @@ what to do when a call returns before the UI settles.
 
 4. `boring-pondnt-d365web serve --config <service.json> --d365web <d365web.json>`, or
    select `d365web` through [pondNT setup](INSTALL.md) (port 18516; refused while
-   `d365web.json` is missing). Keep your complete intended service list and use
-   `-Gateway all` for the recommended routing: core and Knowledge direct, the
-   other selected services through Ferry.
+   d365web.json is missing). Existing owned services remain included and Ferry
+   routing is automatic.
+   Core and Knowledge remain direct.
 
 ### Optional dedicated D365 test user
 
@@ -378,7 +380,7 @@ recommended layout (core and Knowledge direct, the rest behind the gateway),
 as you would do them on the box's desktop:
 
 1. **Sign in a dedicated profile and write the configuration:** double-click
-   `browser-signin.cmd` in the release folder, as yourself (not elevated).
+   `browser-signin.cmd d365web` in the release folder, as yourself (not elevated).
    Answer `d365web`, take the suggested AOS address or type yours, and the
    company. It writes
    `%LOCALAPPDATA%\boring-pondnt\services\d365web\d365web.json` (setup refuses
@@ -390,22 +392,19 @@ as you would do them on the box's desktop:
    Get-Content "$env:LOCALAPPDATA\boring-pondnt\services\d365web\d365web.json"
    ```
 
-3. **Add it with everything you already have** (an elevated PowerShell in
-   the release folder; list every installed service, see
+3. **Add it** (an elevated PowerShell in the release folder; setup reads existing
+   owned services and their index, see
    [Update, and back](INSTALL.md#10-update-and-back), step 2):
 
    ```powershell
-   powershell -ExecutionPolicy Bypass -File .\setup.ps1 -WhatIf -SkipIndex -Gateway all -Services 'sourcecache,knowledge,canvas,core,d365,d365web' -Index J:\pondnt\d365.db
-   powershell -ExecutionPolicy Bypass -File .\setup.ps1 -Yes -SkipIndex -Gateway all -Services 'sourcecache,knowledge,canvas,core,d365,d365web' -Index J:\pondnt\d365.db
+   powershell -ExecutionPolicy Bypass -File .\setup.ps1 -WhatIf -Services d365web
+   powershell -ExecutionPolicy Bypass -File .\setup.ps1 -Yes -Services d365web
    ```
 
-   These commands cover the five default services plus d365web. Retain
-   any installed d365whsapp or d365data in both service lists too; prepare
-   their configuration before selecting them. The preview should show the
-   intended full selection and routing. Existing keys are kept when valid
-   with at least 30 days left. Client publication can change entries or
-   credentials when needed; inspect setup's result and refresh the client
-   if its managed configuration changed.
+   These commands add d365web and retain existing owned services. Prepare its
+   configuration first; the preview shows the observed scope and fixed gateway.
+   Reruns retain keys; only `-RotateKeys` replaces them. Inspect setup's result
+   and refresh the client if its generated entries changed.
 4. **Find it through the gateway.** In Visual Studio (Copilot, Agent mode),
    ask for boring-gateway's `service_list`: `d365web` is listed and answers.
    `service_describe` with `{"service": "d365web"}` shows its tools and this
@@ -428,8 +427,9 @@ as you would do them on the box's desktop:
    follow the shipped sign-in helper and setup implementation.
 
 If step 5 answers `signin_required`, the profile's sign-in expired or
-belongs to another profile: run `browser-signin.cmd` again (it takes the
-profile from `d365web.json`).
+belongs to another profile: run `browser-signin.cmd d365web` in the release
+folder again (it takes the profile from `d365web.json`); for a tunnel copy,
+sign in inside the Edge window that server opens.
 
 ### Earlier workflow evidence
 

@@ -35,7 +35,11 @@ _ERROR_PREFIX = "An exception occured when invoking the operation - "
 
 
 class ProtocolError(ValueError):
-    """A request that would break the echo rule; raised before anything is sent."""
+    """A protocol or request-validation issue; the caller owns dispatch status."""
+
+    def __init__(self, message: str, *, code: str = "invalid_request") -> None:
+        super().__init__(message)
+        self.code = code
 
 
 def escape_attribute_whitespace(xml: str) -> str:
@@ -195,28 +199,28 @@ def build_request(page: Page, values: dict[str, str] | None = None, press: str |
     for name, value in values.items():
         control = by_name.get(name)
         if control is None:
-            raise ProtocolError(f"no field {name!r} on this page; fields: {', '.join(page.inputs()) or 'none'}")
+            raise ProtocolError(f"no field {name!r} on this page; fields: {', '.join(page.inputs()) or 'none'}", code="not_found")
         if control.type not in INPUT_TYPES:
             raise ProtocolError(f"{name!r} is a {control.type}, not an input field")
         if not control.enabled:
-            raise ProtocolError(f"{name!r} is read-only on this page")
+            raise ProtocolError(f"{name!r} is read-only on this page", code="conflict")
         if not isinstance(value, str):
             raise ProtocolError(f"value for {name!r} must be a string")
         if _XML_INVALID.search(value):
             raise ProtocolError(f"value for {name!r} holds a control character the request cannot carry")
         if control.length > 0 and len(value) > control.length:
-            raise ProtocolError(f"{name!r} takes at most {control.length} characters")
+            raise ProtocolError(f"{name!r} takes at most {control.length} characters", code="limit")
     if press is not None:
         control = by_name.get(press)
         if control is None or control.type not in BUTTON_TYPES:
-            raise ProtocolError(f"no button {press!r} on this page; buttons: {', '.join(page.buttons()) or 'none'}")
+            raise ProtocolError(f"no button {press!r} on this page; buttons: {', '.join(page.buttons()) or 'none'}", code="not_found")
         if not control.enabled:
-            raise ProtocolError(f"button {press!r} is disabled")
+            raise ProtocolError(f"button {press!r} is disabled", code="conflict")
     root = _copy(page.root)
     names = [node.get("name", "") for node in root.find("Controls").findall("Control")]  # type: ignore[union-attr]
     for name in list(values) + ([press] if press is not None else []):
         if names.count(name) > 1:  # the echo would write every control of that name, a label included
-            raise ProtocolError(f"{name!r} names more than one control on this page; nothing was sent")
+            raise ProtocolError(f"{name!r} names more than one control on this page; nothing was sent", code="ambiguous")
     for node in root.find("Controls").findall("Control"):  # type: ignore[union-attr]
         name = node.get("name", "")
         if name in values:

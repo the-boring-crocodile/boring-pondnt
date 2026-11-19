@@ -155,8 +155,8 @@ def test_no_sql_batch_starts_after_the_scripts_timeout(tmp_path, atomic):
     is_error, data = sql_call(tmp_path, connection, timeout=1, atomic=atomic)
     assert connection.sent == ["DELETE FROM A"]  # batches 2 and 3 were never sent
     assert is_error and data["code"] == "timeout" and data["status"] == "failed"
-    assert data["details"]["batches_done"] == 1 and data["details"]["batch"] == 2
-    assert data["details"]["rolled_back"] is atomic and connection.rolled_back is atomic
+    assert data["batches_done"] == 1 and data["batch"] == 2
+    assert data["rolled_back"] is atomic and connection.rolled_back is atomic
 
 
 def test_a_sql_script_within_its_timeout_runs_every_batch(tmp_path):

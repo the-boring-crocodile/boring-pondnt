@@ -48,16 +48,16 @@ def absolute(path: str) -> Path:
     text = str(path)
     if text.startswith(("\\\\", "//", "\\??\\")):
         raise Refused("invalid_request", "network shares and device paths are not supported; give a local path",
-                      path=path)
+                      path=str(path))
     if _DRIVE.match(text):
         if ":" in text[2:]:
             raise Refused("invalid_request", "alternate data streams (':' after the drive) are not supported",
-                          path=path)
+                          path=str(path))
         if any(_DEVICE_NAME.match(part.rstrip(" .")) for part in re.split(r"[\\/]", text[3:]) if part):
-            raise Refused("invalid_request", "device names (CON, NUL, COM1, ...) are not files", path=path)
+            raise Refused("invalid_request", "device names (CON, NUL, COM1, ...) are not files", path=str(path))
     p = Path(path)
     if not p.is_absolute():
-        raise Refused("invalid_request", "path must be absolute", path=path)
+        raise Refused("invalid_request", "path must be absolute", path=str(path))
     return p
 
 
@@ -142,9 +142,14 @@ def _read(p: Path, limit: int, hint: str, identify: bool):
         raise Refused("forbidden", "file is not accessible", path=str(p)) from None
 
 
-def require_parent(p: Path) -> None:
+def require_parent(p: Path, operation: str = "file_write") -> None:
     if not p.parent.is_dir():
-        raise Refused("not_found", "directory does not exist", path=str(p.parent))
+        folder = p.parent
+        while folder.parent != folder and not folder.parent.exists():
+            folder = folder.parent
+        raise Refused("not_found", f"folder '{folder}' does not exist; "
+                      f"{operation} does not create folders; create it first or choose another path",
+                      path=str(folder))
 
 
 def require_writable(p: Path) -> None:
@@ -191,9 +196,18 @@ def mutation_metadata(p: Path):
         info = p.lstat()
     except FileNotFoundError:
         return None
-    if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
-            or getattr(info, "st_file_attributes", 0) & 0x400):
-        raise Refused("forbidden", "mutation requires a regular single-link non-reparse file", path=str(p))
+    if stat.S_ISLNK(info.st_mode) or getattr(info, "st_file_attributes", 0) & 0x400:
+        raise Refused("forbidden", "path is a symbolic link or reparse point; file edits do not follow links",
+                      path=str(p), kind="symlink")
+    if stat.S_ISDIR(info.st_mode):
+        raise Refused("forbidden", "path is a directory; file tools edit regular files (use file_list)",
+                      path=str(p), kind="directory")
+    if not stat.S_ISREG(info.st_mode):
+        raise Refused("forbidden", "path is not a regular file; sockets, devices and FIFOs are not supported",
+                      path=str(p), kind="other")
+    if info.st_nlink != 1:
+        raise Refused("forbidden", "file has multiple hard links; editing requires a single-link regular file",
+                      path=str(p), kind="other")
     if os.name != "nt" and hasattr(os, "listxattr") and os.listxattr(p, follow_symlinks=False):
         raise Refused("forbidden", "file has unsupported extended metadata", path=str(p))
     return info

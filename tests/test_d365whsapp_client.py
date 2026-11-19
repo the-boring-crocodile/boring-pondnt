@@ -95,7 +95,7 @@ def test_local_refusal_sends_nothing():
     c.login("WHSAPP01", "1")
     with pytest.raises(WhsError) as raised:
         c.submit("WHSAPP01", {"Qty": "1"}, None)
-    assert raised.value.code == "refused"
+    assert raised.value.code == "not_found"
     with pytest.raises(WhsError, match="no button 'Nope'"):
         c.submit("WHSAPP01", None, "Nope")
     assert len(fake.requests) == 2

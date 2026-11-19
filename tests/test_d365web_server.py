@@ -29,10 +29,10 @@ class FakeClient:
         return self._record("state", full, max_rows)
 
     def set(self, values):
-        raise D365WebError("not_found", "no visible field 'X' in the current form", similar=["XY"])
+        raise D365WebError("not_found", "no visible field 'X' in the current form", similar=["XY"], status='refused')
 
     def press(self, name, nth=0):
-        raise D365WebError("signin_required", "profile 'alligator' is not signed in")
+        raise D365WebError("signin_required", "profile 'alligator' is not signed in", status='failed')
 
     def lookup(self, field, pick=None, nth=0):
         return self._record("lookup", field, pick, nth)
@@ -113,7 +113,7 @@ def test_results_running_and_outcomes(tmp_path):
     assert not error and running["status"] == "running" and "web_wait" in running["hint"]
     error, outcome = call(server, "web_set", {"values": {"X": "1"}})
     assert error and outcome["status"] == "refused" and outcome["code"] == "not_found"
-    assert outcome["details"]["similar"] == ["XY"]
+    assert outcome["similar"] == ["XY"]
     error, outcome = call(server, "web_press", {"name": "OK"})
     assert error and outcome["status"] == "failed" and outcome["code"] == "signin_required"
     error, outcome = call(server, "web_state", {"max_rows": 5000})

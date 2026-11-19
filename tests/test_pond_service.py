@@ -97,22 +97,21 @@ class Service:
     def __init__(self, tmp_path: Path) -> None:
         self.cp = FakeControlPlane()
         now = int(time.time())
-        good = {"active": True, "aud": OWN_URL, "exp": now + 300, "sub": "pond", "client_id": "control-plane"}
+        good = {"active": True, "aud": OWN_URL, "exp": now + 300, "sub": "pond",
+                "client_id": "control-plane", "iss": self.cp.url, "role": "writer"}
         self.cp.tokens.update({
-            "pond": good, "garden": dict(good, sub="garden"),
+            "pond": good, "garden": {"active": False},
             "other-service": dict(good, aud="http://127.0.0.1:18512/mcp"),
             "expired": dict(good, exp=now - 1), "no-sub": {k: v for k, v in good.items() if k != "sub"}})
         self.watchdog = RecordingWatchdog()
         self.tmp_path = tmp_path
-        # What tools/devbox-start.ps1 writes: the Crocodile through the tunnel, the Pond "pond" the only caller.
+        # A tunnel server configuration: the Crocodile through the tunnel, the Pond "pond" the only caller.
         (tmp_path / "secret").write_text(SECRET)
         (tmp_path / "config.json").write_text(json.dumps({
-            "url": OWN_URL, "bind": "127.0.0.1", "port": 18520,
-            "oauth": {"issuer": self.cp.url, "introspection_url": self.cp.url + "/introspect",
-                      "client_id": CLIENT_ID, "secret_file": "secret"},
-            "pond": {"url": self.cp.url, "client_id": CLIENT_ID, "secret_file": "secret"},
-            "access": [{"subject": "pond", "role": "writer", "author": "pond"}]}))
+            "url": OWN_URL, "mode": "crocodile",
+            "crocodile": {"url": self.cp.url, "client_id": CLIENT_ID, "secret_file": "secret"}}))
         config = ServiceConfig(tmp_path / "config.json")
+        self.verifier = config.verifier
         self.call_limit = config.call_limit  # registered with a Pond: the Pond's bound
         self.app = config.app(self.make_server(config.auth))
 
@@ -163,8 +162,8 @@ def test_an_allowed_pond_uses_the_tools(tmp_path):
     run(scenario())
 
 
-def test_a_valid_token_for_another_pond_is_refused(tmp_path):
-    """Defence in depth for an admin shell: the grant may say more, the server says only these Ponds."""
+def test_a_token_without_a_crocodile_grant_is_refused(tmp_path):
+    """The Crocodile alone owns admission; introspection refuses the ungranted Pond."""
     async def scenario() -> None:
         async with Service(tmp_path) as service:
             response = await service.call("file_list", {"path": str(tmp_path)}, token="garden")
@@ -262,6 +261,33 @@ def test_sourcecache_as_a_pond_service(tmp_path):
             body = {"jsonrpc": "2.0", "id": 1, "method": "server/discover", "params": {"_meta": _meta("pond")}}
             assert (await service.client.post("/mcp", json=body, headers=_headers("server/discover"))).status_code == 200
             assert service.watchdog.pings == ["pond"]
+    run(scenario())
+
+
+def test_a_new_crocodile_grant_needs_no_local_caller_list(tmp_path):
+    async def scenario():
+        async with Service(tmp_path) as service:
+            assert (await service.call("job_list", {}, token="garden")).status_code == 401
+            service.cp.tokens["garden"] = {**service.cp.tokens["pond"], "sub": "garden", "role": "reader"}
+            is_error, result = await service.result("job_list", {}, token="garden")
+            assert not is_error and result["jobs"] == []
+    run(scenario())
+
+
+def test_a_role_change_takes_effect_at_cache_expiry_without_restart(tmp_path, monkeypatch):
+    from boring_service_kit.pond import INTROSPECTION_CACHE_SECONDS
+    async def scenario():
+        async with Service(tmp_path) as service:
+            service.cp.tokens["pond"]["role"] = "reader"
+            args = {"path": str(tmp_path / "created"), "content": "ok", "expected_sha256": None}
+            assert (await service.result("file_write", args))[1]["code"] == "forbidden"
+            service.cp.tokens["pond"]["role"] = "writer"
+            assert (await service.result("file_write", args))[1]["code"] == "forbidden"
+            after_cache = time.time() + INTROSPECTION_CACHE_SECONDS + 1
+            with monkeypatch.context() as clock:
+                clock.setattr(service.verifier, "clock", lambda: after_cache)
+                assert (await service.result("file_write", args))[0] is False
+            assert (tmp_path / "created").read_text() == "ok"
     run(scenario())
 
 

@@ -74,18 +74,19 @@ def test_echo_changes_only_values_and_the_pressed_button():
     assert parse_page(raw).control("Qty").data == ""  # the page itself is untouched
 
 
-@pytest.mark.parametrize("values, press, reason", [
-    ({"Nope": "1"}, None, "no field 'Nope'"),
-    ({"PONum": "x"}, None, "read-only"),
-    ({"RFDescription1": "x"}, None, "not an input field"),
-    ({"ItemId": "A" * 81}, None, "at most 80"),
-    ({}, "Nope", "no button 'Nope'"),
-    ({}, "Qty", "no button 'Qty'"),
+@pytest.mark.parametrize("values, press, reason, code", [
+    ({"Nope": "1"}, None, "no field 'Nope'", "not_found"),
+    ({"PONum": "x"}, None, "read-only", "conflict"),
+    ({"RFDescription1": "x"}, None, "not an input field", "invalid_request"),
+    ({"ItemId": "A" * 81}, None, "at most 80", "limit"),
+    ({}, "Nope", "no button 'Nope'", "not_found"),
+    ({}, "Qty", "no button 'Qty'", "not_found"),
 ])
-def test_refusals_before_sending(values, press, reason):
+def test_refusals_before_sending(values, press, reason, code):
     page = parse_page(sample("poreceive-qty-tab.xml"))
-    with pytest.raises(ProtocolError, match=reason):
+    with pytest.raises(ProtocolError, match=reason) as caught:
         build_request(page, values, press)
+    assert caught.value.code == code
 
 
 def test_length_limit():

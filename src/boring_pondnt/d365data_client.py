@@ -242,7 +242,7 @@ class DataClient:
             return self.config.timeout
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            raise Failed("timeout", "the call deadline expired")
+            raise Refused("not_admitted", "the call deadline expired before dispatch; nothing was sent")
         return remaining
 
     def _request(self, path: str, method: str = "GET", body: bytes | None = None,
@@ -256,7 +256,8 @@ class DataClient:
             try:
                 token = self.tokens.get(deadline=deadline)
             except EntraError as error:
-                raise Failed(error.code, mask_error(error.message), **error.details) from None
+                cls = Refused if error.dispatch_started is False else Failed
+                raise cls(error.code, mask_error(error.message), **error.details) from None
             headers = {"Authorization": f"Bearer {token}", "Accept": accept}
             if page_size is not None:
                 headers["Prefer"] = f"odata.maxpagesize={page_size}"
@@ -298,7 +299,7 @@ class DataClient:
             except (ValueError, AttributeError, TypeError, RecursionError):
                 pass
             if response.status == 412 and if_match is not None:
-                raise Failed("conflict", "the record changed since it was read (its etag no longer matches); "
+                raise Refused("conflict", "the record changed since it was read (its etag no longer matches); "
                              "nothing was written: read it again and decide", http_status=412)
             if method != "GET" and response.status >= 500:
                 # a gateway or server error can come after D365 committed the write
@@ -309,16 +310,26 @@ class DataClient:
             raise Failed("d365_error", message, http_status=response.status)
         return response.text
 
-    def metadata(self, refresh: bool = False) -> dict[str, dict[str, Any]]:
-        with self._metadata_lock:
+    def metadata(self, refresh: bool = False, *, deadline: float | None = None) -> dict[str, dict[str, Any]]:
+        cached = self._metadata
+        if not refresh and cached is not None:
+            return cached
+        if deadline is None:
+            deadline = time.monotonic() + self.config.timeout
+        if not self._metadata_lock.acquire(blocking=False):
+            raise Refused("busy", "Loading D365 metadata; retry in a few seconds.")
+        try:
             if refresh:
                 self._metadata = None
             if self._metadata is not None:
                 return self._metadata
             try:
                 text = self._request("/data/$metadata", max_bytes=self.config.metadata_max_bytes,
-                                     accept="application/xml")
+                                     accept="application/xml", deadline=deadline)
             except Failed as error:
+                if error.code == "timeout":
+                    raise Refused("busy", "D365 metadata did not load within the call budget "
+                                  "(D365 may still be warming up); retry in a few seconds.") from None
                 if error.code == "limit" and error.details.get("truncated"):
                     raise Failed("limit", f"D365 metadata exceeded metadata_max_bytes "
                                  f"({self.config.metadata_max_bytes:,} bytes); raise metadata_max_bytes in "
@@ -373,22 +384,27 @@ class DataClient:
             except (ET.ParseError, ValueError) as error:
                 raise Failed("bad_reply", f"cannot parse OData metadata: {error}") from None
             self._metadata = sets
+            self._timeout(deadline)  # parsing counts too; a later call can use the completed cache
             return sets
+        finally:
+            self._metadata_lock.release()
 
-    def _entity(self, entity: str) -> dict[str, Any]:
+    def _entity(self, entity: str, deadline: float) -> dict[str, Any]:
         _name(entity, "entity set")
-        result = self.metadata().get(entity)
+        result = self.metadata(deadline=deadline).get(entity)
         if result is None:
             raise Refused("not_found", "entity set not found", entity=entity)
         return result
 
     def entities(self, search: str | None = None, entity: str | None = None,
                  refresh: bool = False, *, max_chars: int = RESULT_CHARS_DEFAULT) -> dict[str, Any]:
+        deadline = time.monotonic() + self.config.timeout
         _check_max_chars(max_chars)
         _text(search, "search")
         if entity:
             _name(entity, "entity set")
-        metadata = self.metadata(refresh=refresh)
+        metadata = self.metadata(refresh=refresh, deadline=deadline)
+        self._timeout(deadline)
         if entity:
             info = metadata.get(entity)
             if info is None:
@@ -413,6 +429,7 @@ class DataClient:
               cross_company: bool = False, next: str | None = None, *,
               max_chars: int = RESULT_CHARS_DEFAULT, include_etag: bool = False,
               count: bool | None = None) -> dict[str, Any]:
+        deadline = time.monotonic() + self.config.timeout
         _check_max_chars(max_chars)
         if count is not None and type(count) is not bool:
             raise Refused("invalid_request", "count must be a boolean")
@@ -447,12 +464,12 @@ class DataClient:
             else:
                 page_size = top if top is not None else 500
             path = next[len(self.config.aos_url):]
-            return self._query_path(path, page_size, max_chars, include_etag)
+            return self._query_path(path, page_size, max_chars, include_etag, deadline)
         if entity is None:
             raise Refused("invalid_request", "entity or next is required")
         if filter:
             _validate_filter_balance(filter)
-        info = self._entity(entity)
+        info = self._entity(entity, deadline)
         if company is not None and not info["company_specific"]:
             raise Refused("invalid_request", "company was specified for an entity without dataAreaId")
         # An explicit cross_company without a company reads all companies; the config default does not apply.
@@ -476,11 +493,11 @@ class DataClient:
         if count:
             params["$count"] = "true"
         path = "/data/" + urllib.parse.quote(entity, safe="") + "?" + urllib.parse.urlencode(params)
-        return self._query_path(path, top, max_chars, include_etag)
+        return self._query_path(path, top, max_chars, include_etag, deadline)
 
-    def _query_path(self, path: str, top: int, max_chars: int, include_etag: bool) -> dict[str, Any]:
+    def _query_path(self, path: str, top: int, max_chars: int, include_etag: bool, deadline: float) -> dict[str, Any]:
         try:
-            data = json.loads(self._request(path, max_bytes=MAX_QUERY_RESPONSE_BYTES, page_size=top))
+            data = json.loads(self._request(path, max_bytes=MAX_QUERY_RESPONSE_BYTES, page_size=top, deadline=deadline))
             rows = data["value"]
             if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
                 raise ValueError("value is not a list of objects")
@@ -522,6 +539,7 @@ class DataClient:
               values: dict[str, Any] | None = None, company: str | None = None, *,
               max_chars: int = RESULT_CHARS_DEFAULT, include_etag: bool = False,
               etag: str | None = None) -> dict[str, Any]:
+        deadline = time.monotonic() + self.config.timeout
         _check_max_chars(max_chars)
         if op not in WRITE_OPERATIONS:
             raise Refused("invalid_request", "op must be create, update or delete")
@@ -547,7 +565,7 @@ class DataClient:
             raise Refused("invalid_request",
                           "D365 OData cannot address a key containing / or \\ in the URL path; "
                           "change or delete the record in the D365 client")
-        info = self._entity(entity)
+        info = self._entity(entity, deadline)
         fields = {f["name"]: f["type"] for f in info["fields"]}
         if company is not None and not info["company_specific"]:
             raise Refused("invalid_request", "company was specified for an entity without dataAreaId")
@@ -594,7 +612,7 @@ class DataClient:
             path += "?cross-company=true"  # the key names its company: address it there, not in the user's default
         body = None if op == "delete" else self._body(payload)
         text = self._request(path, method={"create": "POST", "update": "PATCH", "delete": "DELETE"}[op], body=body,
-                             if_match=etag)
+                             if_match=etag, deadline=deadline)
         if op == "delete":
             result = _limit_reply({"deleted": keys, "truncated": False}, "deleted", max_chars)
             return _add_note(result, company_note)
@@ -738,11 +756,15 @@ class DataClient:
                                   "executionId": "", "execute": execute, "overwrite": overwrite, "legalEntityId": company},
                                   deadline)
                 execution_id = self._execution(value)
-            except Failed as error:
+            except (Refused, Failed) as error:
                 note = "A storage blob may remain. Inspect D365 before retrying. No automatic delete or retry."
                 if uploaded:
                     note = "The import may have been submitted. Check D365 execution history before retrying. " + note
-                error.details.update(upload_name=blob_name, note=note)
+                details = {**error.details, "upload_name": blob_name, "note": note}
+                if isinstance(error, Refused):
+                    details["effects"] = "unknown"
+                    raise Failed(error.code, error.message, **details) from None
+                error.details.update(details)
                 raise
             result = {"execution_id": execution_id, "upload_name": blob_name, "package_bytes": len(data)}
             if not execute:
@@ -824,13 +846,14 @@ class DataClient:
 
     def action(self, entity: str, action: str, arguments: dict[str, Any] | None = None, *,
                max_chars: int = RESULT_CHARS_DEFAULT) -> dict[str, Any]:
+        deadline = time.monotonic() + self.config.timeout
         _check_max_chars(max_chars)
         _name(action, "action")
         if entity.lower() == "datamanagementdefinitiongroups":
             raise Refused("forbidden", "DMF actions belong to dmf tools")
-        self._entity(entity)
+        self._entity(entity, deadline)
         if arguments is not None and not isinstance(arguments, dict):
             raise Refused("invalid_request", "arguments must be an object")
         path = "/data/" + urllib.parse.quote(entity, safe="") + "/Microsoft.Dynamics.DataEntities." + action
-        result = self._reply(self._request(path, method="POST", body=self._body(arguments or {})), "value")
+        result = self._reply(self._request(path, method="POST", body=self._body(arguments or {}), deadline=deadline), "value")
         return _limit_reply(result, "value", max_chars)

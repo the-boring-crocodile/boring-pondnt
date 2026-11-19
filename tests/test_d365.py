@@ -125,7 +125,7 @@ def test_names_are_checked_before_powershell_sees_them(server):
 
 def test_build_job_runs_and_its_log_is_masked(server):
     _, started = call(server, "d365_build", {"module": "ContosoExt"})
-    assert started["state"] in ("running", "exited") and started["kind"] == "build"
+    assert started["state"] in ("running", "completed") and started["kind"] == "build"
     is_error, data = call(server, "d365_job", {"job_id": started["job_id"], "wait_seconds": 15})
     assert not is_error and not data["wait_expired"]
     assert data["exit_code"] == 0
@@ -177,7 +177,7 @@ def test_job_wait_owner_refuses_out_of_bounds_before_process_access(tmp_path, se
 def test_a_job_can_be_stopped(server):
     _, started = call(server, "d365_db_sync", {"modules": ["SlowJob"]})
     _, stopped = call(server, "d365_job", {"job_id": started["job_id"], "stop": True})
-    assert stopped["state"] == "stopped"
+    assert stopped["state"] == "cancelled"
 
 
 DIAGNOSTICS = """<?xml version="1.0" encoding="utf-8"?>
@@ -311,7 +311,7 @@ def test_server_masks_failures(server):
     finally:
         session.call = original
     assert is_error and data["code"] == "command_failed" and "Password=***" in data["message"]
-    assert all(SECRET not in line for line in data["details"]["noise"])
+    assert all(SECRET not in line for line in data["noise"])
 
 
 def test_a_hanging_call_times_out_and_the_session_restarts(fake_ps, tmp_path):
@@ -461,7 +461,7 @@ def test_a_second_sync_waits_for_the_first(server, tmp_path):
     _, started = call(server, "d365_db_sync", {"modules": ["SlowJob"]})
     try:
         is_error, data = call(server, "d365_db_sync", {"modules": ["ContosoExt"]})
-        assert is_error and data["code"] == "locked" and data["details"]["job_id"] == started["job_id"]
+        assert is_error and data["code"] == "locked" and data["job_id"] == started["job_id"]
         (logs / "SyncEngine.exe_StdOutput.log").write_text("SyncMode: PartialList\n")
         _, data = call(server, "d365_results", {"kind": "sync"})
         assert "partial" in data["note"]
@@ -514,8 +514,8 @@ def test_sql_batches_commit_one_by_one_and_stop_at_the_first_error(fake_ps, tmp_
                   "INSERT INTO T (ID, NAME) VALUES (11, 'never')")
         is_error, data = call(s, "d365_sql", {"sql": script})
         assert is_error and data["code"] == "sql_error" and "UNIQUE" in data["message"].upper()
-        assert data["details"]["batch"] == 2 and data["details"]["batches_done"] == 1
-        assert data["details"]["rolled_back"] is False
+        assert data["batch"] == 2 and data["batches_done"] == 1
+        assert data["rolled_back"] is False
         ids = [r[0] for r in sqlite3.connect(db).execute("SELECT ID FROM T ORDER BY ID")]
         assert ids == [1, 2, 3, 10]
     finally:
@@ -531,7 +531,7 @@ def test_sql_atomic_is_all_or_nothing(fake_ps, tmp_path):
                   "INSERT INTO T (ID, NAME) VALUES (20, 'twenty')\nGO\n"
                   "INSERT INTO T (ID, NAME) VALUES (1, 'duplicate')")
         is_error, data = call(s, "d365_sql", {"sql": script, "atomic": True})
-        assert is_error and data["details"]["rolled_back"] is True and data["details"]["batch"] == 3
+        assert is_error and data["rolled_back"] is True and data["batch"] == 3
         rows = sqlite3.connect(db).execute("SELECT ID, NAME FROM T ORDER BY ID").fetchall()
         assert rows == [(1, "Grüße ✓"), (2, "two"), (3, "three")]
         is_error, data = call(s, "d365_sql", {"sql": script.rsplit("GO", 1)[0], "atomic": True})

@@ -1,7 +1,7 @@
 """Reader and writer grants through the real authenticated HTTP path.
 
-The grant's role is the configuration's `access` entry; the token is checked by
-introspection against the fake control plane, exactly as in production. A
+The Crocodile's introspection reply owns the grant's role, exactly as in
+production; the service keeps no caller-policy copy. A
 refused call must have no effect: no file, no process, no stub call.
 """
 
@@ -29,9 +29,7 @@ class RoleService(Service):
         super().__init__(tmp_path)
 
     def make_server(self, auth):
-        policy = auth["token_verifier"].introspection.policy
-        caller = policy.grants["pond"]
-        policy.grants["pond"] = type(caller)(caller.issuer, caller.subject, caller.author, self.role)
+        self.cp.tokens["pond"]["role"] = self.role
         return super().make_server(auth)
 
 
@@ -114,7 +112,7 @@ def test_a_readers_batch_with_a_writer_step_runs_no_step(tmp_path):
                 {"id": "read", "method": "file_read", "arguments": {"path": str(tmp_path / "seen.txt")}},
                 {"id": "write", "method": "file_write",
                  "arguments": {"path": str(created), "content": "batch", "expected_sha256": None}}]})
-            assert is_error and refusal["code"] == "forbidden" and refusal["details"]["step"] == "write"
+            assert is_error and refusal["code"] == "forbidden" and refusal["step"] == "write"
             for method, arguments in (("exec", {"command": f"echo x > {created}"}),
                                       ("job_start", {"command": f"echo x > {created}"}),
                                       ("job_stop", {"job_id": "0" * 32})):
@@ -143,11 +141,11 @@ def test_a_reader_reads(tmp_path):
                                     ("job_list", {})):
                 is_error, data = await service.result(tool, arguments)
                 assert not is_error, (tool, data)
-            # No job exists for a reader to observe: these reach the job manager and answer not_found.
-            for tool, arguments in (("job_wait", {"job_ids": ["0" * 32], "wait_seconds": 0}),
-                                    ("job_output", {"job_id": "0" * 32})):
-                is_error, data = await service.result(tool, arguments)
-                assert is_error and data["code"] == "not_found", (tool, data)
+            is_error, data = await service.result("job_wait", {"job_ids": ["0" * 32], "wait_seconds": 0})
+            assert not is_error and data["settled"] and not data["wait_expired"]
+            assert data["jobs"][0]["refusal"]["code"] == "not_found"
+            is_error, data = await service.result("job_output", {"job_id": "0" * 32})
+            assert is_error and data["code"] == "not_found"
     run(scenario())
 
 

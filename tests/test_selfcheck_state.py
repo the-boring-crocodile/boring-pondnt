@@ -12,3 +12,7 @@ def test_selfcheck_preserves_preexisting_probe_name(tmp_path, monkeypatch):
     assert next(c for c in result["checks"] if c["name"] == "state_dir")["ok"]
     assert sentinel.read_bytes() == b"operator-owned"
     assert list(tmp_path.iterdir()) == [sentinel]
+
+
+def test_selfcheck_accepts_completed_job(tmp_path):
+    assert selfcheck._job_check(tmp_path).startswith("started, waited, read in ")

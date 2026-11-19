@@ -405,6 +405,7 @@ class Job:
     tree: Tree | None = None
     timeout_seconds: float | None = None  # D365 jobs run until they end or are stopped
     state: str = "running"
+    timed_out: bool = False
     exit_code: int | None = None
     ended: float | None = None
     error: str | None = None
@@ -497,7 +498,7 @@ class Jobs(ProcessJobs[Job]):
         job = self._get(job_id)
         with self._lock:
             result: dict[str, Any] = {"job_id": job.job_id, "kind": job.kind, "state": job.state,
-                                      "exit_code": job.exit_code, "log": job.log}
+                                      "exit_code": job.exit_code, "timed_out": job.timed_out, "log": job.log}
             result["seconds"] = round((job.ended or time.time()) - job.started, 1)
             if job.cleanup_error is not None:
                 result.update(error=job.cleanup_error, cleanup_confirmed=False)

@@ -4,18 +4,19 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "boring-pondnt"
-version = "0.2.10"
+version = "0.3.0"
 license = "AGPL-3.0-or-later"
 license-files = ["LICENSE", "COPYING.md"]
 description = "MCP servers over loopback HTTP for Copilot in Visual Studio on a Dynamics 365 F&O dev box"
-requires-python = ">=3.10"
-# boring-registry, boring-service-kit and boring-file-core come from Pond Common releases.
+requires-python = ">=3.12"
+# boring-outcomes, boring-registry, boring-service-kit and boring-file-core come from Pond Common releases.
 dependencies = [
     "mcp>=2.2,<2.3",
-    "boring-sourcecache-d365>=0.1.15,<0.2",
-    "boring-registry>=0.7.10,<0.8",
-    "boring-service-kit[process]>=0.7.13,<0.8",
-    "boring-file-core>=0.7.10,<0.8",
+    "boring-sourcecache-d365>=0.2.0,<0.3",
+    "boring-outcomes>=0.8.0,<0.9",
+    "boring-registry>=0.8.0,<0.9",
+    "boring-service-kit[process]>=0.8.0,<0.9",
+    "boring-file-core>=0.8.0,<0.9",
     "pyodbc>=5.3,<6; sys_platform == 'win32'",
 ]
 

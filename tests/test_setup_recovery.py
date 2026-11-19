@@ -1,108 +1,99 @@
-"""Interrupted routing changes retain the previous client's usable credentials and files."""
-import asyncio
+"""Source-level layout journey for Phase21; fixture files only."""
 import json
-import time
-
 import pytest
-from boring_service_kit.http import ServiceConfig
 from boring_pondnt import setup_services as setup
 
 
-def prepared(state, servers, gated, only=None):
-    return setup.plan(servers, "C:/release", str(state), "", only or ["knowledge", "canvas", "d365web"],
-                      "Robin", "DEVBOX", apply=True, now=time.time(), gated=gated)
+def prepare(state, only=None, servers=None, apply=True):
+    return setup.plan(servers or {}, "C:/reviewed-release", str(state), "G:/source.db",
+                      only or setup.DEFAULT_ONLY.split(","), "Robin", "BOX", apply=apply)
 
 
-def published(servers, result):
-    value = {k: v for k, v in servers.items() if k not in result["removals"]}
-    value.update({s["name"]: s["entry"] for s in result["services"] if "entry" in s})
-    return value
+def entries(result):
+    return {item["name"]: item["entry"] for item in result["services"] if "entry" in item}
 
 
-def finish(state, servers, result):
-    value = published(servers, result)
-    # Finalization consumes the actual published shape, not the preparation result.
-    path = state / "client.json"
-    path.write_text(json.dumps({"servers": value}))
-    setup.finalize(json.loads(path.read_text())["servers"], str(state), "Robin", "DEVBOX")
-    return value
+def test_fresh_layout_has_three_entries_without_an_operator_roster(tmp_path):
+    result = prepare(tmp_path)
+    assert set(entries(result)) == {"boring-pondnt", "boring-knowledge", "boring-gateway"}
+    assert result["gateway"]["carries"] == ["boring-sourcecache", "boring-canvas", "boring-d365"]
+    routes = json.loads((tmp_path / "services/gateway/ferry.json").read_text())
+    assert set(routes["backends"]) == {"sourcecache", "canvas", "d365"}
+    assert not (tmp_path / "services/gateway/selection.json").exists()
+    assert not (tmp_path / "services/gateway/ferry.before-selection.json").exists()
 
 
-def existing(state):
-    web = state / "services/d365web"
-    web.mkdir(parents=True)
-    (web / "d365web.json").write_text("{}")
-    result = prepared(state, {}, ["canvas", "d365web"])
-    return finish(state, {}, result)
+def test_every_opt_in_specialist_uses_the_same_fixed_gateway_rule(tmp_path):
+    for short, (filename, _) in setup.OPT_IN_CONFIGS.items():
+        folder = tmp_path / "services" / short
+        folder.mkdir(parents=True)
+        (folder / filename).write_text("{}")
+    chosen = setup.DEFAULT_ONLY.split(",") + list(setup.OPT_IN_CONFIGS)
+    result = prepare(tmp_path, only=chosen)
+    assert set(entries(result)) == {"boring-pondnt", "boring-knowledge", "boring-gateway"}
+    for item in result["services"]:
+        direct = item["name"] in {"boring-pondnt", "boring-knowledge", "boring-gateway"}
+        assert (item["behind"] is None) is direct
+    routes = json.loads((tmp_path / "services/gateway/ferry.json").read_text())
+    assert set(routes["backends"]) == set(chosen) - {"core", "knowledge"}
+    before = {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
+    prepare(tmp_path, only=chosen, servers=entries(result))
+    assert {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()} == before
 
 
-def verify(state, short, authorization):
-    config = ServiceConfig(state / "services" / short / "config.json")
-    access = asyncio.run(config.keys.verify_token(authorization.removeprefix("Bearer ")))
-    assert access.subject == "robin@devbox"
+def test_core_and_knowledge_only_need_no_gateway(tmp_path):
+    result = prepare(tmp_path, only=["core", "knowledge"])
+    assert set(entries(result)) == {"boring-pondnt", "boring-knowledge"}
+    assert "gateway" not in result
 
 
-def test_interrupted_gateway_retirement_keeps_roster_and_old_credentials_for_retry(tmp_path):
-    servers = existing(tmp_path)
-    gateway = tmp_path / "services/gateway"
-    before = {p.name: p.read_bytes() for p in gateway.glob("*.headers.json")}
-    before["ferry.json"] = (gateway / "ferry.json").read_bytes()
-    only, gated = setup.choose_gated("none", ["knowledge"], str(tmp_path))
-    assert "d365web" in only
-    prepared(tmp_path, servers, gated, only)  # interrupted before task/client publication
-    assert all((gateway / n).read_bytes() == data for n, data in before.items())
-    verify(tmp_path, "gateway", servers["boring-gateway"]["headers"]["Authorization"])
-    for short in ("canvas", "d365web"):
-        verify(tmp_path, short, json.loads(before[short + ".headers.json"])["Authorization"])
-
-    # The same minimal retry still discovers the opt-in backend from retained state.
-    retry_only, retry_gated = setup.choose_gated("none", ["knowledge"], str(tmp_path))
-    assert retry_only == only
-    result = prepared(tmp_path, servers, retry_gated, retry_only)
-    new_client = finish(tmp_path, servers, result)
-    assert "boring-gateway" not in new_client and "boring-d365web" in new_client
-    assert not (gateway / "ferry.json").exists() and not list(gateway.glob("*.headers.json"))
-    verify(tmp_path, "d365web", new_client["boring-d365web"]["headers"]["Authorization"])
+def test_preview_lists_the_fixed_layout_and_writes_nothing(tmp_path):
+    result = prepare(tmp_path, apply=False)
+    assert "boring-gateway" in {item["name"] for item in result["services"]}
+    assert all("entry" not in item for item in result["services"])
+    assert not list(tmp_path.iterdir())
 
 
-def test_shrinking_gateway_keeps_retired_backend_headers_until_publication(tmp_path):
-    servers = existing(tmp_path)
-    gateway = tmp_path / "services/gateway"
-    old_header = (gateway / "d365web.headers.json").read_bytes()
-    result = prepared(tmp_path, servers, ["canvas"])
-    assert (gateway / "d365web.headers.json").read_bytes() == old_header
-    verify(tmp_path, "d365web", json.loads(old_header)["Authorization"])
-    new_client = finish(tmp_path, servers, result)
-    assert (gateway / "canvas.headers.json").exists()
-    assert not (gateway / "d365web.headers.json").exists()
-    verify(tmp_path, "d365web", new_client["boring-d365web"]["headers"]["Authorization"])
+def test_owned_task_scope_keeps_backend_when_adding_a_direct_service(tmp_path):
+    first = prepare(tmp_path, only=["canvas"])
+    header = tmp_path / "services/canvas/client.headers.json"
+    before = header.read_bytes()
+    result = setup.plan(entries(first), "C:/reviewed-release", str(tmp_path), "",
+                        ["knowledge"], "Robin", "BOX", apply=True,
+                        installed=("canvas", "gateway"))
+    assert result["gateway"]["carries"] == ["boring-canvas"]
+    assert header.read_bytes() == before
+    assert {s["name"] for s in result["services"]} == {
+        "boring-knowledge", "boring-canvas", "boring-gateway"}
 
 
-def test_failed_preparation_preserves_previous_gateway_and_client_keys(tmp_path, monkeypatch):
-    servers = existing(tmp_path)
-    gateway = tmp_path / "services/gateway"
-    old_ferry = (gateway / "ferry.json").read_bytes()
-    actual = setup.write_private
-
-    def fail(path, value):
-        if path.name == "d365web.headers.json":
-            raise OSError("synthetic interrupted preparation")
-        actual(path, value)
-
-    monkeypatch.setattr(setup, "write_private", fail)
-    with pytest.raises(OSError, match="interrupted preparation"):
-        prepared(tmp_path, servers, ["canvas", "d365web"])
-    assert (gateway / "ferry.json").read_bytes() == old_ferry
-    verify(tmp_path, "gateway", servers["boring-gateway"]["headers"]["Authorization"])
-    for short in ("canvas", "d365web"):
-        verify(tmp_path, short, json.loads((gateway / (short + ".headers.json")).read_text())["Authorization"])
+def test_retained_config_is_not_an_installed_task_roster(tmp_path):
+    prepare(tmp_path, only=["canvas"])
+    before = {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
+    result = setup.plan({}, "C:/reviewed-release", str(tmp_path), "", ["knowledge"],
+                        "Robin", "BOX", apply=False, installed=())
+    assert [s["name"] for s in result["services"]] == ["boring-knowledge"]
+    assert "gateway" not in result
+    assert {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()} == before
 
 
-def test_customized_client_gateway_refuses_cleanup_and_preserves_routing(tmp_path):
-    servers = existing(tmp_path)
-    gateway = tmp_path / "services/gateway"
-    before = {p.name: p.read_bytes() for p in gateway.iterdir() if p.is_file()}
-    servers["boring-gateway"] = {"type": "http", "url": "https://custom.example/mcp"}
-    with pytest.raises(ValueError, match="customized"):
-        setup.finalize(servers, str(tmp_path), "Robin", "DEVBOX")
-    assert {p.name: p.read_bytes() for p in gateway.iterdir() if p.is_file()} == before
+def test_uninstall_uses_hidden_owned_tasks_and_the_observed_index(tmp_path):
+    first = prepare(tmp_path)
+    before = {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
+    result = setup.uninstall(entries(first), str(tmp_path), "C:/reviewed-release",
+                             "G:/source.db", installed=tuple(setup.DEFAULT_ONLY.split(",") + ["gateway"]))
+    assert len(result["tasks"]) == 6
+    source = next(s for s in result["services"] if s["name"] == "boring-sourcecache")
+    assert source["arguments"][source["arguments"].index("--db") + 1] == "G:/source.db"
+    assert {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()} == before
+
+
+def test_describe_reads_no_client_input_and_writes_nothing(tmp_path, monkeypatch, capsys):
+    import io
+    monkeypatch.setattr("sys.stdin", io.StringIO("not client JSON"))
+    setup.main(["--root", "C:/release", "--state", str(tmp_path), "--describe"])
+    result = json.loads(capsys.readouterr().out)
+    assert {s["short"] for s in result["services"]} == set(setup.SERVICES)
+    source = next(s for s in result["services"] if s["short"] == "sourcecache")
+    assert source["arguments"][source["arguments"].index("--db") + 1] == ""
+    assert not list(tmp_path.iterdir())

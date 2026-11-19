@@ -162,7 +162,7 @@ def test_server_import_can_be_polled_and_refuses_concurrent_imports(tmp_path):
         assert all(25 < timeout <= 40 for timeout in timeouts)
         assert invoke(server, "dmf_status", args) == (False, pending)
         error, busy = invoke(server, "dmf_import", IMPORT)
-        assert error and busy["code"] == "busy" and busy["details"]["submission_id"] == submission_id
+        assert error and busy["code"] == "busy" and busy["submission_id"] == submission_id
         assert submission_id in busy["message"]
         restarted = create_server(client(tmp_path), state)
         error, unknown = invoke(restarted, "dmf_status", args)
@@ -386,7 +386,7 @@ def test_import_submit_failure_keeps_upload_name_and_retry_note(tmp_path):
     assert error.value.details["upload_name"] == json.loads(lookup[2])["uniqueFileName"]
     note = error.value.details["note"]
     assert "may have been submitted" in note and "execution history" in note and "before retrying" in note
-    assert "PRIVATE" not in str(error.value.as_dict())
+    assert "PRIVATE" not in str(error.value.as_data())
     assert sum(call[0].endswith(".ImportFromPackage") for call in fake.calls) == 1
 
 
@@ -515,7 +515,7 @@ def test_dmf_status_maps_only_the_missing_execution_reply(tmp_path, message, cod
                            {"execution_id": execution_id})
     assert error and result["code"] == code
     if code == "not_found":
-        assert result["status"] == "refused" and result["details"]["execution_id"] == execution_id
+        assert result["status"] == "refused" and result["execution_id"] == execution_id
     assert not any(call[0].endswith(".GetExecutionErrors") for call in fake.calls)
 
 
@@ -588,7 +588,7 @@ def test_storage_failures_never_submit_or_expose_sas(tmp_path):
     with pytest.raises(Failed) as error:
         client(tmp_path, fake).dmf_import("p", "input.zip", "usmf")
     assert error.value.code == "storage_error"
-    assert "PRIVATE" not in str(error.value.as_dict())
+    assert "PRIVATE" not in str(error.value.as_data())
     assert not any("ImportFromPackage" in c[0] for c in fake.calls)
     fake.responses["blob"] = Response(200, "", truncated=True, raw=b"x")
     result = client(tmp_path, fake).dmf_status("id", True)

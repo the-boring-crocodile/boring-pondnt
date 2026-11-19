@@ -41,7 +41,7 @@ def test_public_job_output_is_bounded_even_for_a_giant_line(tmp_path, start):
             handle.write(b"x" * 65536)
         handle.write(b"TAIL")
     manager._jobs["synthetic"] = Job("synthetic", "synthetic", "sh", str(tmp_path),
-                                     1, directory, 0, state="exited")
+                                     1, directory, 0, state="completed")
     manager._jobs["synthetic"].done.set()  # this fixture represents an already settled job
     tracemalloc.start()
     try:

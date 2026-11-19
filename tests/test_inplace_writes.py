@@ -37,6 +37,27 @@ def test_missing_original_is_not_recreated(tmp_path):
     assert not path.exists()
 
 
+@pytest.mark.parametrize("operation", ["file_write", "file_write_bytes", "file_patch"])
+@pytest.mark.parametrize("replace", [False, True])
+def test_missing_write_folder_names_the_folder_and_recovery(tmp_path, operation, replace):
+    path = tmp_path / "missing" / "deeper" / "file"
+    expected = disk.sha256_bytes(b"old") if replace else None
+    with pytest.raises(Refused) as caught:
+        if operation == "file_write":
+            textfiles.write_text(str(path), "new", expected)
+        elif operation == "file_write_bytes":
+            binfiles.write_bytes(str(path), "bmV3", expected)
+        else:
+            textfiles.patch_text(str(path), disk.sha256_bytes(b"old"),
+                                 [{"old_text": "old", "new_text": "new"}])
+    assert caught.value.code == "not_found"
+    assert caught.value.details["path"] == str(tmp_path / "missing")
+    assert str(tmp_path / "missing") in caught.value.message
+    assert f"{operation} does not create folders" in caught.value.message
+    assert "create it first or choose another path" in caught.value.message
+    assert not (tmp_path / "missing").exists()
+
+
 def test_inplace_writer_finishes_short_os_writes():
     class ShortWriter:
         def __init__(self):

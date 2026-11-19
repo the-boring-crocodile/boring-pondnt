@@ -22,7 +22,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, fields
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Literal
 from urllib.parse import parse_qs, urlsplit
 
 from . import d365web_whsform as whsform
@@ -91,7 +91,7 @@ class AppBackend:
     def screen(self, worker: str) -> Shown:
         session = self.client.session(worker)
         if session.page is None:
-            raise WhsError("no_session", f"worker {worker} has no current page; call whs_login")
+            raise WhsError("no_session", f"worker {worker} has no current page; call whs_login", status='refused')
         return self.shown(session.page)
 
     def require_session(self, worker: str) -> None:
@@ -111,9 +111,10 @@ class AppBackend:
 class FormError(WhsError):
     """A d365web refusal or failure, with its details (the form page, if any)."""
 
-    def __init__(self, code: str, message: str, details: dict[str, Any] | None = None) -> None:
-        super().__init__(code, message)
-        self.details = details or {}
+    def __init__(self, code: str, message: str, details: dict[str, Any] | None = None, *,
+                 status: Literal["refused", "failed"]) -> None:
+        super().__init__(code, message, status=status)
+        self.details.update(details or {})
 
 
 class FormBackend:
@@ -159,7 +160,7 @@ class FormBackend:
         key = worker.strip().upper()
         deadline = time.monotonic() + self.web.budget  # one budget for waiting our turn and for the step
         if not self.lock.acquire(timeout=-1 if in_run else self.web.budget):
-            raise WhsError("busy", "the form is busy with another worker's step; try again in a moment")
+            raise WhsError("busy", "the form is busy with another worker's step; try again in a moment", status='refused')
         left = None if in_run else max(0.1, deadline - time.monotonic())
         if budget is None:
             budget = left
@@ -170,15 +171,15 @@ class FormBackend:
                 if run is not None:
                     if not collect or run.owner != key:
                         raise WhsError("busy", f"collect the previous form step with whs_screen for "
-                                       f"{run.owner} before starting another operation")
+                                       f"{run.owner} before starting another operation", status='refused')
                     page = self.web.wait(left if left is not None else self.web.budget)
                 else:
                     page = self.web.call(label, op, budget, owner=key)
             except StillRunning:
                 raise WhsError("step_running", f"a form step is still running in D365; call whs_screen for "
-                               f"{key} in a few seconds to collect its result or error") from None
+                               f"{key} in a few seconds to collect its result or error", status='failed') from None
             except D365WebError as error:
-                raise FormError(error.code, error.message, error.details) from None
+                raise FormError(error.code, error.message, error.details, status=error.status) from None
             self.pages[key] = page
             return page
         finally:
@@ -198,24 +199,24 @@ class FormBackend:
         main = web.page
         if tab is None:
             if not create:
-                raise D365WebError("no_session", f"worker {key} is not logged in to the form here; call whs_login")
+                raise D365WebError("no_session", f"worker {key} is not logged in to the form here; call whs_login", status=self.web._status())
             # The tab Edge starts with (about:blank) is nothing else's here: the first worker takes it rather
             # than leaving an empty tab next to its own.
             tab = main if main is not None and main not in self.tabs.values() and self._blank(main) \
-                else web.browser.new_page()
+                else web._action(web.browser.new_page)
             self.tabs[key] = tab
         web.page = tab
         try:
             # The worker's tab stays in front afterwards: whoever watches sees the app, not a blank tab.
             try:
-                tab.send("Page.bringToFront")
+                web._action(tab.send, "Page.bringToFront")
             except BrowserError:
                 if web.browser is None or web.browser.conn.closed:
                     raise  # the browser itself: _guarded resets it
                 self.tabs.pop(key, None)  # closed by hand or crashed: the session is not here any more
                 self.pages.pop(key, None)
                 raise D365WebError("no_session", f"worker {key}'s form tab is gone (closed or crashed); "
-                                   "call whs_login") from None
+                                   "call whs_login", status=self.web._status()) from None
             yield tab
         finally:
             web.page = main
@@ -230,7 +231,7 @@ class FormBackend:
     def _page(self) -> dict[str, Any]:
         raw = self.web._js("whsform")
         if not raw:
-            raise D365WebError("not_found", "the WHSWorkExecute form is not open in this worker's tab")
+            raise D365WebError("not_found", "the WHSWorkExecute form is not open in this worker's tab", status=self.web._status())
         page = whsform.page_from_form(raw)
         page.update(self.web.browser_mode())
         return page
@@ -240,7 +241,7 @@ class FormBackend:
         if state.get("scope") != "dialog" or state.get("form") != "WHSWorkExecute":  # an infolog box over it
             raise D365WebError("unexpected", f"after {name!r}: {state.get('scope')}:{state.get('form')}",
                                dialog_text=str(state.get("dialog_text", ""))[:500],
-                               messages=[m.get("text", "")[:300] for m in state.get("new_messages") or []])
+                               messages=[m.get("text", "")[:300] for m in state.get("new_messages") or []], status='failed')
 
     def _lookup_expression(self, company: str) -> str:
         path = lookup_path(company)
@@ -281,7 +282,7 @@ class FormBackend:
     def _logoff_names(self, company: str) -> tuple[str, ...]:
         """Synchronous discovery for direct callers; runtime form calls use start/poll below."""
         try:
-            reply = self.web.page.evaluate(self._lookup_expression(company),
+            reply = self.web._action(self.web.page.evaluate, self._lookup_expression(company),
                                            timeout=LOOKUP_SECONDS + 2, await_promise=True)
         except BrowserError as error:
             raise LookupError(f"page-side OData request failed ({error.code})") from None
@@ -306,7 +307,7 @@ class FormBackend:
             return id;
         })()""" % (json.dumps(ident), self._lookup_expression(company))
         page = self.web.page
-        result = page.evaluate(expression, timeout=2)
+        result = self.web._action(page.evaluate, expression, timeout=2)
         future: Future[tuple[str, ...]] = Future()
         if result != ident:
             raise LookupError("page-side OData lookup did not start")
@@ -393,25 +394,25 @@ class FormBackend:
                     items = self.logoff_items.get(self._company(), self._logoff_worker, self._start_logoff_names,
                                                  submit=lambda work: work(), pump=self._poll_lookups)
                 except LookupPending as pending:  # nothing pressed; the tab and session stay
-                    raise D365WebError("retry_later", str(pending), page=whsform.public(page)) from None
+                    raise D365WebError("retry_later", str(pending), page=whsform.public(page), status=self.web._status()) from None
             buttons = whsform.view_of(page).buttons
             target = exit_button(buttons, items.names + tuple(self.logoff_items.buttons),
                                  acknowledge=page["page"] == "work" and not page.get("fields")
                                  and not _asks(page.get("title"), (page.get("message") or {}).get("text")))
             if target is None:
                 raise D365WebError("stuck", items.stuck(buttons, self.logoff_items.buttons),
-                                   page=whsform.public(page))
+                                   page=whsform.public(page), status=self.web._status())
             seen = (page.get("title"), tuple(page.get("buttons") or ()), tuple(sorted((page.get("fields") or {}).items())), target)
             if seen == last:
                 # the same button again on the same page: it does not lead out (it may do work each time)
                 raise D365WebError("stuck", f"{target!r} did not leave this page; not pressed again. " +
-                                   items.stuck(buttons, self.logoff_items.buttons), page=whsform.public(page))
+                                   items.stuck(buttons, self.logoff_items.buttons), page=whsform.public(page), status=self.web._status())
             last = seen
             self._press(target)
         page = self._page()
         raise D365WebError("stuck", f"still not at the login page after {LOGOFF_STEPS_MAX} presses; " +
                            items.stuck(whsform.view_of(page).buttons, self.logoff_items.buttons),
-                           page=whsform.public(page))
+                           page=whsform.public(page), status=self.web._status())
 
     def _close_tab(self, worker: str) -> None:
         web = self.web
@@ -419,9 +420,9 @@ class FormBackend:
         if tab is not None and web.browser is not None:
             try:
                 if tab is web.page:  # the start tab: emptied, not closed (the last tab would end Edge)
-                    tab.send("Page.navigate", {"url": "about:blank"})
+                    web._action(tab.send, "Page.navigate", {"url": "about:blank"})
                 else:
-                    web.browser.conn.send("Target.closeTarget", {"targetId": tab.target_id})
+                    web._action(web.browser.conn.send, "Target.closeTarget", {"targetId": tab.target_id})
             except BrowserError:
                 pass
 
@@ -444,7 +445,7 @@ class FormBackend:
             raise D365WebError(
                 "set_incomplete", "form values were rejected or did not take; no button was pressed",
                 applied=whsform.public_applied(applied),
-                **{k: result[k] for k in ("stopped_at", "new_messages") if k in result},
+                status=self.web._status(), **{k: result[k] for k in ("stopped_at", "new_messages") if k in result},
                 page=whsform.public(self._page()))
 
     def _op_login(self, worker: str, password: str, company: str | None) -> dict[str, Any]:
@@ -460,10 +461,12 @@ class FormBackend:
                 # through. Never type it again on a guess: repeated failures disable the worker.
                 raise D365WebError("login_outcome_unknown", f"after pressing Login: {error.message}. Check the "
                                    "worker with whs_screen; do not retry the password before you know it was "
-                                   "wrong", **error.details) from None
+                                   "wrong", status='failed', **error.details) from None
             if created:
                 self._close_tab(worker)  # no session came of it: no tab that claims one
-            raise
+            raise D365WebError(error.code, error.message,
+                               status="failed" if error.status == "failed" else self.web._status(),
+                               **error.details) from None
         finally:
             self._login_pressed = False
 
@@ -486,7 +489,7 @@ class FormBackend:
                 if error.code == "retry_later":  # the tab still shows an earlier session; nothing was pressed
                     raise D365WebError("retry_later", "the worker's tab still shows an earlier session and the "
                                        "logoff menu items are still being looked up; nothing was pressed: call "
-                                       "whs_login again in a few seconds", **error.details) from None
+                                       "whs_login again in a few seconds", status=self.web._status(), **error.details) from None
                 raise
             self._set([("UserId", worker), ("Password", password)])
             self._login_pressed = True
@@ -501,7 +504,7 @@ class FormBackend:
             self._close_tab(worker)
             raise D365WebError("login_failed", (page.get("message") or {}).get("text")
                                or "login refused (not retried: repeated failures disable the worker)",
-                               page=whsform.public(page))
+                               page=whsform.public(page), status='failed')
         return page
 
     def _op_logoff(self, worker: str) -> dict[str, Any]:
@@ -528,12 +531,12 @@ class FormBackend:
     def login(self, worker: str, password: str, company: str | None) -> tuple[Shown, bool]:
         key, name = worker.strip().upper(), worker.strip()
         if not name:
-            raise WhsError("refused", "worker is empty")
-        self.pages.pop(key, None)
+            raise WhsError("invalid_request", "worker is empty", status='refused')
         try:
             page = self._call(worker, "whs_login", lambda: self._op_login(name, password, company))
-        except WhsError:
-            self.pages.pop(key, None)
+        except WhsError as error:
+            if error.status == "failed":
+                self.pages.pop(key, None)
             raise
         resumed = bool(page.pop("resumed", False)) or page["page"] != "Menu"  # a fresh login lands on the main menu
         return self.shown(page), resumed
@@ -548,7 +551,7 @@ class FormBackend:
         try:
             page = self._call(worker, "whs_logoff", lambda: self._op_logoff(worker))
         except WhsError as error:
-            if error.code != "retry_later":  # retry_later keeps the session and its page
+            if error.status == "failed":  # a refused call keeps the session and its page
                 self.pages.pop(worker.strip().upper(), None)
             raise
         self.pages.pop(worker.strip().upper(), None)
@@ -560,7 +563,7 @@ class FormBackend:
     def require_session(self, worker: str) -> None:
         key = worker.strip().upper()
         if key not in self.tabs:
-            raise WhsError("no_session", f"worker {key} is not logged in to the form here; call whs_login")
+            raise WhsError("no_session", f"worker {key} is not logged in to the form here; call whs_login", status='refused')
 
     def describe_values(self, worker: str, values: dict[str, Any] | None) -> str:
         return whsform.describe_values(values, self.pages.get(worker.strip().upper()))

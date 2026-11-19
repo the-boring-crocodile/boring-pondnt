@@ -50,18 +50,17 @@ hypothesis: it has not been measured in a way worth publishing.
 The handbook can also give Copilot a voice (`handbook/persona.md`); "Plain, please"
 switches it off for the session.
 
-Install: [docs/INSTALL.md](docs/INSTALL.md). **Recommended: use Ferry with
-`setup.ps1 -Gateway all`.** Core and Knowledge remain directly available;
-the other selected services are discovered and called through the gateway.
+Install: [docs/INSTALL.md](docs/INSTALL.md). Core and Knowledge are direct;
+every other installed service is discovered and called through Ferry.
 
 ## What runs on the box
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/pondnt-dark.svg">
-  <img alt="pondNT on a disposable D365 dev box: Copilot in Visual Studio has three MCP entries, core (files, commands and long jobs, running as you, elevated), Knowledge (the agent's notebook, as SYSTEM) and Ferry (a gateway as SYSTEM with four tools for the rest). Through Ferry: the D365 server (build, sync, SQL, xref, as you, elevated; it answers to a writer key, which Ferry holds), Sourcecache and Canvas (as SYSTEM), and the opt-in browser and warehouse servers (as you, elevated) that work D365 forms and warehouse screens over HTTPS. The D365 server and the browser servers act on the D365 environment: AOS, AxDB and source." src="docs/pondnt.svg">
+  <img alt="pondNT on a disposable D365 dev box: Copilot in Visual Studio has three MCP entries, core (files, commands and long jobs, running as you, elevated), Knowledge (the agent's notebook, as the person) and Ferry (a gateway as the person with four tools for the rest). Through Ferry: the D365 server (build, sync, SQL, xref, as you, elevated; it answers to a writer key, which Ferry holds), Sourcecache and Canvas (as the person), and the opt-in browser and warehouse servers (as you, elevated) that work D365 forms and warehouse screens over HTTPS. The D365 server and the browser servers act on the D365 environment: AOS, AxDB and source." src="docs/pondnt.svg">
 </picture>
 
-The recommended layout gives Copilot three MCP entries: core, Knowledge
+The standard layout gives Copilot three MCP entries: core, Knowledge
 and Ferry. Core keeps the workspace tools at hand; Knowledge keeps the
 agent's notes available. Ferry exposes four discovery and call tools for
 Sourcecache, Canvas, D365 and any selected browser or warehouse server.
@@ -69,44 +68,41 @@ The agent discovers those specialist tools when needed, keeping the initial
 tool list small. Tool descriptions and schemas consume input tokens when sent
 to the model; loading them on demand can reduce that overhead and its cost.
 The saving depends on the client's discovery and caching behaviour and the
-task. This asks the model to take an extra discovery step;
-[direct connections remain available](docs/INSTALL.md#the-short-way-setupps1).
+task. The fixed layout adds a discovery step for specialist tools.
 
-Use `setup.ps1 -Gateway all` to choose this layout. Browser, warehouse and
-data servers remain opt-in: the flag routes selected services, it does not select
-or configure every optional service. Each server still runs separately on
+Browser, warehouse and data servers remain opt-in: prepare their settings and
+add them with -Services; setup reads existing services and the index from their
+owned tasks. Each server still runs separately on
 127.0.0.1 with its own access key. **Ferry forwards calls; it does not host
 or start the backend processes.** Setup creates the keys and scheduled tasks.
 
 The following accounts and start times describe the **standard scheduled
 installation created by `setup.ps1`**:
 
-| Server | Port | Does | Runs as | Starts |
+| Server | Default port | Does | Runs as | Starts |
 |---|---|---|---|---|
 | boring-pondnt-core | 18513 | Files, commands, jobs | you, elevated | at logon |
 | boring-pondnt-d365 | 18514 | Build, sync, SQL, xref | you, elevated | at logon |
 | boring-pondnt-d365web | 18516 | D365 browser forms | you, elevated | at logon |
 | boring-pondnt-d365whsapp | 18515 | Warehouse app protocol or form simulator | you, elevated | at logon |
 | boring-pondnt-d365data | 18518 | OData and DMF packages | you, elevated | at logon |
-| Ferry (recommended) | 18517 | Discover and call the configured backends | SYSTEM | at boot |
-| Sourcecache | 18501 | D365 source, elements, labels | SYSTEM | at boot |
-| Knowledge | 18512 | Notes the agents keep | SYSTEM | at boot |
-| Canvas | 18511 (web page 18510) | Shared drawings | SYSTEM | at boot |
+| Ferry (recommended) | 18517 | Discover and call the configured backends | you | at logon |
+| Sourcecache | 18501 | D365 source, elements, labels | you | at logon |
+| Knowledge | 18512 | Notes the agents keep | you | at logon |
+| Canvas | 18511 (MCP and browser) | Shared drawings | you | at logon |
 
 These are this box's ports. On a Linux site the same services use their own
 (Sourcecache 18513 there, where 18513 is the core here): the
 [services README](https://github.com/the-boring-crocodile/boring-services/blob/main/README.md#before-the-first-install).
 
-With an operator-maintained manual launcher instead, the servers run under
-the account that launches them and start when that launcher is run. An elevated
-desktop CMD can start the whole stack as the person; those processes do not
-become SYSTEM tasks or automatically start at boot/logon. Ports, access keys
-and Ferry routing are independent of how the processes are started. The
-release's standard installer manages scheduled tasks; a custom manual launcher
-has its own startup and recovery arrangements.
+Setup supports the desktop installation; manual launchers and setup over SSH
+are unsupported. Existing service configs belong to the operator; setup follows
+their ports. Canvas serves MCP and browser routes on its one configured listener;
+the resource URL without /mcp is the browser prefix. Without autologon, services start when the
+person signs in.
 
-The optional Pond tunnel uses 18520 (core), 18522 (D365), 18524 (warehouse),
-18526 (browser) and 18528 (OData/DMF).
+The optional [Pond tunnel](docs/DEVBOX_TUNNEL.md) runs separately, with its
+own settings, servers and data.
 
 **Target:** a rebuildable Azure VM (Windows Server, D8v5) with a Dynamics 365
 Supply Chain Management development environment; Copilot in Visual Studio on
@@ -188,6 +184,19 @@ Sourcecache, Knowledge and Canvas come from boring-services.
 `boring-service-kit` (outcomes, call log, tool conventions, process trees, the Pond-service
 side), `boring-registry` and `boring-file-core` come from Pond Common releases;
 the release build takes their wheels with `--common-wheels`. `tests/corpus.py` is the synthetic D365 corpus. `handbook/` holds the working agreement `bootstrap` serves.
+
+Service authors: Common 0.8 renders `Outcome.as_data()` with `status`, `code`,
+`message` and flat JSON detail fields; `as_dict()` was removed. Convert paths,
+bytes, sets and timestamps at the construction site. The wrapper returns one
+compact JSON text block, with no duplicate structured copy. Downstream outcomes
+must include `status: refused|failed`; bare `{code,message}` now becomes
+`failed/tool_error` with unknown effects. Preserve downstream status, cause and
+details. Refused means nothing started or changed; Failed means work started
+and may have had effects. Browser and WHS errors require an explicit status at
+construction; server adapters carry it unchanged. A cause such as conflict may
+accompany either status: a disabled control before input is refused; a later
+conflict after input is failed. There is no per-server code list deciding status.
+Protocol and lifecycle records keep their own shapes.
 
 Tests in `tests/`. `requirements.lock` and `requirements-tests.lock` pin
 everything the release ships with hashes (`scripts/lock.py`); the one check is

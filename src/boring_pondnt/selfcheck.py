@@ -70,7 +70,7 @@ def _job_check(state: Path) -> str:
         command = "Write-Output job-ok" if IS_WINDOWS else "echo job-ok"
         job = manager.start(command, timeout_seconds=120)
         status = manager.wait([job["job_id"]], 60)["jobs"][0]
-        if status["state"] != "exited" or status["exit_code"] != 0:
+        if status["state"] != "completed" or status["exit_code"] != 0:
             raise CheckFailed(f"job ended as {status['state']} with {status['exit_code']}")
         output = manager.output(job["job_id"])["content"].strip()
         if output != "job-ok":

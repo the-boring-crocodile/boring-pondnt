@@ -7,6 +7,10 @@ and then with System administrator, the setup used for dev-box regression.
 The live checks covered a stress round, the limited user's permissions and
 an administrator run.
 
+Use d365data only for the development box's own D365 environment or another
+disposable development environment. Shared sandboxes and production-connected
+systems are outside pondNT's supported scope, even with a limited D365 role.
+
 ## Install
 
 ### 1. Choose the app, user and D365 permissions
@@ -16,12 +20,13 @@ the warehouse app or the Admin user. Map the app in
 D365's Microsoft Entra applications form. The MCP access key authenticates
 Copilot to this service, independently of the Entra credentials used for D365.
 
-**Which rights the user gets depends on the box:**
+**Choose rights within that disposable environment:**
 
 - **Your own dev box (testing, regression):** give the dedicated user
   **System administrator**. Tests then cover everything an administrator can
   do, including creating DMF projects and restarting any batch job.
-- **Shared boxes and Tier 2 sandboxes:** give it a limited role, as below.
+- **Limited-permission testing:** give the dedicated user a restricted role,
+  as below. This does not make a shared or production-connected environment supported.
 
 **The permissions table below is source evidence; the role after it was
 verified live.** Choose the
@@ -132,14 +137,14 @@ metadata_max_bytes is optional, defaults to 128 MiB and accepts 1–268435456
 bytes (256 MiB). Oversized metadata fails with a `limit` error that names
 metadata_max_bytes as the setting to raise.
 
-Add d365data to the **complete intended selection**, preserving your existing
-services, then [preview and apply setup](INSTALL.md#the-short-way-setupps1).
-For all services with Ferry:
+Add d365data after preparing its configuration. Existing owned services and the
+Sourcecache index are read from their tasks; Ferry routing is automatic.
 
 ~~~powershell
-powershell -ExecutionPolicy Bypass -File .\setup.ps1 -WhatIf -Gateway all -Services 'sourcecache,knowledge,canvas,core,d365,d365web,d365whsapp,d365data'
-powershell -ExecutionPolicy Bypass -File .\setup.ps1 -Gateway all -Services 'sourcecache,knowledge,canvas,core,d365,d365web,d365whsapp,d365data'
+powershell -ExecutionPolicy Bypass -File .\setup.ps1 -Services d365data
 ~~~
+
+Use -WhatIf for a read-only preview. Core and Knowledge stay direct.
 
 Select other opt-ins only when their configurations are ready. d365data is
 never installed by default; setup refuses it while d365data.json is missing.

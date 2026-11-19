@@ -16,5 +16,5 @@ function Get-NetTCPConnection { throw 'Preview attempted listener readiness' }
 function Read-Host { throw 'Preview attempted interactive confirmation' }
 $env:LOCALAPPDATA=Join-Path $Fixture 'local'
 $env:PYTHONDONTWRITEBYTECODE='1'
-& $Setup -WhatIf -SkipIndex -Source (Join-Path $Fixture 'source') -Index (Join-Path $Fixture 'fixture.db') -McpJson (Join-Path $Fixture 'mcp.json') -Services 'knowledge,canvas'
+& $Setup -WhatIf -Index (Join-Path $Fixture 'fixture.db') -McpJson (Join-Path $Fixture 'mcp.json') -Services 'knowledge,canvas'
 Write-Output 'PASS: setup preview returned without machine mutations.'

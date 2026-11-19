@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Regenerate requirements.lock and requirements-tests.lock, pinned with hashes.
 
-One universal lock (Python 3.10-3.14, all platforms) for everything the release
+One universal lock (Python 3.12-3.14, all platforms) for everything the release
 ships besides the five packages built from source at release time (boring-pondnt
 and, from boring-services, sourcecache-d365, knowledge, canvas and mcp-ferry). Pond Common
 comes from its released wheels (--common-wheels, until Common is on a package
@@ -45,6 +45,9 @@ def main():
         # Test tools only, constrained by the runtime lock so both install together.
         develop.lock(args, ROOT / "requirements-tests.lock", [tmp / "tests.in"], find_links=[wheels],
                      extra=["--constraint", str(ROOT / "requirements.lock")], how=COMMAND)
+        tests_lock = ROOT / "requirements-tests.lock"
+        tests_lock.write_text(tests_lock.read_text().replace(
+            "# via -r " + str(tmp / "tests.in"), "# via -r <temporary tests.in>"))
     return 0
 
 

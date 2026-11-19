@@ -65,7 +65,7 @@ def test_shutdown_owns_a_concurrently_starting_job(tmp_path, monkeypatch):
         assert not worker.is_alive() and not closer.is_alive()
         assert not errors and len(started) == 1
         assert tree.closed.is_set(), "shutdown missed the admitted process"
-        assert manager.status(started[0]["job_id"])["state"] == "stopped"
+        assert manager.status(started[0]["job_id"])["state"] == "cancelled"
     finally:
         release.set()
         worker.join(5)

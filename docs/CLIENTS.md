@@ -31,11 +31,11 @@ Two things follow from copying:
 - **The key is a password for that server.** The core's key runs commands
   elevated, as you. Keep it out of anything shared or committed; where a
   client can prompt for a secret, let it.
-- **setup renews its managed keys, not your copies.** Keys last 365 days;
-  running setup with fewer than 30 left rotates them through its managed
-  client entries or gateway headers. It does not update another client's
-  configuration. After old-key retirement, update those copies from the
-  current managed entry; never put a populated key in a shared project file.
+- **Reruns keep keys; rotation is explicit.** Setup keys have a fixed 100-year
+  technical expiry. Each service's private `client.headers.json` owns its
+  bearer and feeds the managed client entry or Ferry. `-RotateKeys` replaces
+  selected bearers; then update copies in other clients yourself. Never put
+  a populated key in a shared project file.
 
 ## VS Code's MCP client (untested)
 

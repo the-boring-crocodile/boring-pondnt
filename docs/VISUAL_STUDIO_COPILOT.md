@@ -14,7 +14,7 @@ for current documented setup paths and the acceptance checks.
 
 ## Recommended pondNT layout
 
-Use [setup with `-Gateway all`](INSTALL.md#the-short-way-setupps1).
+Use [setup and its fixed gateway layout](INSTALL.md#the-short-way-setupps1).
 Copilot connects directly to core and Knowledge and discovers the other
 selected services through Ferry. Expect `boring-pondnt`, `boring-knowledge`
 and `boring-gateway` in the client configuration, not a direct entry for

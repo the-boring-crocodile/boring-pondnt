@@ -59,7 +59,7 @@ class Submissions:
             except FileNotFoundError:
                 ids = []
             except (OSError, ValueError, RecursionError):
-                raise Failed("submission_state", "cannot read the DMF submission receipts. " + CHECK_HISTORY) from None
+                raise Refused("submission_state", "cannot read the DMF submission receipts. " + CHECK_HISTORY) from None
             self._records = dict.fromkeys(ids)
         return self._records
 
@@ -80,8 +80,12 @@ class Submissions:
                 self.path.parent.mkdir(parents=True, exist_ok=True)
                 disk.replace_atomically(self.path, json.dumps(list(recent)).encode("utf-8"),
                                         create=not self.path.exists())
-            except (OSError, Outcome):
-                raise Failed("submission_state", "cannot record the DMF submission. Nothing was sent.") from None
+            except Outcome as error:
+                raise type(error)(error.code, error.message + " Nothing was sent to D365.",
+                                  **{**error.details, "d365_dispatch_started": False}) from None
+            except OSError:
+                raise Refused("submission_state", "cannot record the DMF submission. Nothing was sent to D365.",
+                              d365_dispatch_started=False) from None
             self._records = recent
             self._active = entry.id
             worker = threading.Thread(target=self._submit, args=(entry, definition_group, data, company, overwrite),
@@ -90,7 +94,7 @@ class Submissions:
                 worker.start()
             except RuntimeError:
                 self._active = None
-                entry.error = Failed("submission_start", "could not start the DMF submission. Nothing was sent.")
+                entry.error = Refused("submission_start", "could not start the DMF submission. Nothing was sent.")
                 entry.done.set()
         if not entry.done.wait(max(0.0, wait_until - time.monotonic())):
             return entry.pending()

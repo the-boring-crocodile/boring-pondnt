@@ -3,6 +3,45 @@
 Notable changes per release, newest first ([Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 [SemVer](https://semver.org/); tags `vX.Y.Z`, candidates `vX.Y.Z-rc.N`).
 
+## 0.3.0 — 2026-11-19
+
+### Upgrading
+
+From the published 0.2.10 mixed SYSTEM/cmd and person/logon layout, use
+the legacy branch of [Update, and back](docs/INSTALL.md#10-update-and-back).
+Create and verify the private recovery copy first. Plan a maintenance
+window. Stop the old tasks and unregister the old SYSTEM tasks before
+previewing the update. Pass the recorded complete `-Services` selection
+and, if Sourcecache is selected, the existing index path with `-Index`.
+For an existing person/logon install, review the scope setup reads from its
+owned tasks.
+
+Setup adds `mode=keys` to old local service configurations. It keeps
+unexpired bearers, and the steps for going back restore the old config
+and matching credentials before starting the old tasks. Keep the old
+folder and recovery copy until the forward update passes.
+
+For the optional tunnel, stop the old launcher before opening the new
+one. Carry over settings using the [tunnel guide](docs/DEVBOX_TUNNEL.md).
+The Linux component owns its registrations and grants. Windows settings
+use `crocodile_url` and the default ports are 18530–18539.
+
+Job clients should read `exit_code` and `timed_out` on completed commands.
+`job_wait` reports `settled`, `wait_expired` and `elapsed_seconds`.
+
+### Changes
+
+- Core and Knowledge are direct client entries when selected. Ferry
+  discovers the selected specialists. One private credential file per
+  service feeds the direct client or Ferry.
+- Services run as the logged-on user in windowless tasks. Setup lists
+  configured services outside the selected scope and refuses an implicit
+  update that would omit them.
+- Canvas uses one listener. The independent tunnel has its own desktop
+  window, settings and state. D365 calls share one deadline per request.
+- The test ZIP includes both Windows test launchers and the portable
+  Services fixtures.
+
 ## 0.2.10 — 2026-11-08
 
 Built on Pond Common 0.7.13 and bundles MCP Ferry 0.1.5, Canvas 0.2.20,
@@ -18,7 +57,7 @@ Added:
   `odata_action`. Data management packages: `dmf_export`, `dmf_import` (can continue in the
   background, polled by submission id) and `dmf_status` (errors for every state, optional
   download). It needs its own Entra app and client secret (DPAPI) and only the environment's URL,
-  so it works against a dev box or a sandbox. Rows, written records and action values are returned
+  for a disposable development environment. Rows, written records and action values are returned
   unmasked; diagnostic text masks storage URLs and credentials. Results are cut at a stated size
   (`max_chars`, up to 262,144) and say how to continue. The devbox tunnel forwards it on 18528.
 - **`d365_logs`** in the D365 server reads batch infologs, process automation messages, Windows
